@@ -1,0 +1,28 @@
+# --- Python 相关 ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+ENV/
+
+# --- 环境变量与密钥 (最重要！) ---
+.env
+*.pem
+*.key
+secrets.py
+
+# --- Docker 相关 ---
+# 如果你的数据目录在仓库里，务必排除
+**/npm/data/
+**/rustdesk/data/
+**/data/
+
+# --- 操作系统与编辑器 ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.log
