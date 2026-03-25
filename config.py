@@ -49,6 +49,7 @@ DEFAULT_APP_TYPE = '2'
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 DEFAULT_TIMEOUT = float(os.getenv('REQUEST_TIMEOUT', '8'))
 DEFAULT_RETRY = int(os.getenv('REQUEST_RETRY', '1'))
+ORDER_DETAIL_SYNC_DELAY_MS = int(os.getenv('ORDER_DETAIL_SYNC_DELAY_MS', '800'))
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() in {'1', 'true', 'yes', 'on'}
 ALLOW_REMOTE = os.getenv('ALLOW_REMOTE', 'false').lower() in {'1', 'true', 'yes', 'on'}
 HOST = '0.0.0.0' if ALLOW_REMOTE else '127.0.0.1'

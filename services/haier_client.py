@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import requests
 from requests import RequestException
 from typing import Any, Dict, Optional
@@ -11,6 +13,7 @@ from config import (
     DEFAULT_RETRY,
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
+    ORDER_DETAIL_SYNC_DELAY_MS,
     SSL_VERIFY,
 )
 
@@ -192,7 +195,15 @@ class HaierClient:
         return self._request('POST', '/trade/lockOrderCreate', json=payload)
 
     def order_detail(self, order_no: str) -> Dict[str, Any]:
-        return self._request('GET', '/trade/order/detail', params={'orderNo': order_no})
+        result = self._request('GET', '/trade/order/detail', params={'orderNo': order_no})
+        if not result.get('ok') or ORDER_DETAIL_SYNC_DELAY_MS <= 0:
+            return result
+
+        time.sleep(ORDER_DETAIL_SYNC_DELAY_MS / 1000)
+        synced_result = self._request('GET', '/trade/order/detail', params={'orderNo': order_no})
+        if not synced_result.get('ok'):
+            return result
+        return synced_result
 
     def place_clothes(self, order_no: str) -> Dict[str, Any]:
         return self._request('POST', '/device/placeClothes', json={'orderNo': order_no})
