@@ -325,16 +325,58 @@ class ReservationService:
             return None
         return parse_iso(str(snapshot.get('invalidTime') or '').strip() or None)
 
+    def _is_final_pending_stage(self, detail: Dict[str, Any]) -> bool:
+        if self._classify_order_detail(detail) != 'pending':
+            return False
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
+        return can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc
+
+    def _settle_pending_order_detail(
+        self,
+        client: HaierClient,
+        order_no: str,
+        detail: Dict[str, Any],
+        *,
+        max_checks: int = 2,
+    ) -> Dict[str, Any]:
+        normalized_order_no = str(order_no or '').strip()
+        current = detail if isinstance(detail, dict) else {}
+        if not normalized_order_no:
+            return current
+
+        checks = 0
+        while checks < max_checks and self._classify_order_detail(current) == 'pending' and not self._is_final_pending_stage(current):
+            next_res = client.order_detail(normalized_order_no)
+            if not next_res.get('ok'):
+                return current
+            next_detail = next_res.get('data') or {}
+            if not isinstance(next_detail, dict) or not next_detail:
+                return current
+            current = next_detail
+            checks += 1
+
+        if self._is_final_pending_stage(current):
+            final_res = client.order_detail(normalized_order_no)
+            if final_res.get('ok'):
+                final_detail = final_res.get('data') or {}
+                if isinstance(final_detail, dict) and final_detail:
+                    current = final_detail
+
+        return current
+
     def sync_task_order_snapshot(self, token: str, order_no: str) -> None:
         normalized_order_no = str(order_no or '').strip()
         if not token or not normalized_order_no:
             return
 
-        detail_res = HaierClient(token).order_detail(normalized_order_no)
+        client = HaierClient(token)
+        detail_res = client.order_detail(normalized_order_no)
         if not detail_res.get('ok'):
             return
 
-        detail = detail_res.get('data') or {}
+        detail = self._settle_pending_order_detail(client, normalized_order_no, detail_res.get('data') or {})
         snapshot = self._normalize_current_order(detail)
         classification = self._classify_order_detail(detail)
         rows = database.fetch_all(
@@ -405,10 +447,24 @@ class ReservationService:
         )
         tasks = [ReservationTask.from_row(row) for row in rows]
         items: list[Dict[str, Any]] = []
+        token = settings_store.get_effective_settings().token
+        client = HaierClient(token) if token else None
         for task in tasks:
+            current_order = self._deserialize_current_order(task.current_order_snapshot)
+            if client and task.active_order_no and current_order and self._classify_order_detail(current_order) == 'pending' and not self._is_final_pending_stage(current_order):
+                settled_detail = self._settle_pending_order_detail(client, task.active_order_no, current_order)
+                settled_snapshot = self._normalize_current_order(settled_detail)
+                task.current_order_snapshot = self._serialize_current_order(settled_snapshot)
+                current_order = settled_snapshot
+                self._update_task(
+                    task.id,
+                    current_order_snapshot=task.current_order_snapshot,
+                    last_checked_at=to_iso(now_local()) or '',
+                    last_error=None,
+                )
             item = task.to_dict(self._fetch_last_event(task.id))
             item['processId'] = self._find_active_process_id(task.active_order_no)
-            item['currentOrder'] = self._deserialize_current_order(task.current_order_snapshot)
+            item['currentOrder'] = current_order
             items.append(item)
         return items
 
@@ -665,7 +721,7 @@ class ReservationService:
             detail_res = client.order_detail(order_no)
             if not detail_res.get('ok'):
                 continue
-            detail = detail_res.get('data') or {}
+            detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
             if self._classify_order_detail(detail) != 'pending':
                 continue
             sort_key = str(order.get('updateTime') or order.get('gmtModified') or order.get('createTime') or '')
@@ -708,7 +764,8 @@ class ReservationService:
         detail_res = client.order_detail(order_no)
         if not detail_res.get('ok'):
             return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
-        return True, order_no, detail_res.get('data') or {}, 'created'
+        detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+        return True, order_no, detail, 'created'
 
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
         state = int(detail.get('state') or 0)
