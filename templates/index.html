@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海乐生活控制台 V5.0</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>🚀 海乐生活控制台 V5.0</h1>
+            <p class="subtitle">后端托管流程状态 · 严格错误判定 · 更清晰的调试与订单管理</p>
+
+            <div class="security-strip {{ 'warn' if not ssl_verify else 'ok' }}">
+                {% if not ssl_verify %}
+                当前运行在 <strong>不安全模式</strong>（SSL_VERIFY=false），仅建议在可信环境下使用。
+                {% else %}
+                当前运行在 <strong>证书校验模式</strong>。
+                {% endif %}
+                {% if allow_remote %}
+                服务已允许远程访问。
+                {% else %}
+                服务仅监听本机地址。
+                {% endif %}
+            </div>
+
+            <div class="field-block">
+                <label for="token">身份 Token</label>
+                <input type="password" id="token" placeholder="输入抓包获取的 Token..." autocomplete="off">
+            </div>
+
+            <div class="row gap">
+                <div class="col-2">
+                    <label for="machine">选择机器</label>
+                    <select id="machine"></select>
+                </div>
+                <div class="col-1 action-col">
+                    <button id="fetchModesBtn" class="btn btn-blue">🔄 提取模式</button>
+                </div>
+            </div>
+
+            <div class="field-block">
+                <label for="mode">选择洗涤模式</label>
+                <select id="mode">
+                    <option value="">等待提取...</option>
+                </select>
+            </div>
+
+            <div class="status-card">
+                <div id="stepStatus" class="status-title">当前状态：待机</div>
+                <div id="stepHint" class="status-hint">请先输入 Token，选择机器并提取模式。</div>
+            </div>
+
+            <div class="step-list" id="stepList"></div>
+
+            <div class="row gap button-row">
+                <button id="nextBtn" class="btn btn-green">▶ 开始流程</button>
+                <button id="resetBtn" class="btn btn-gray">重置流程</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🛡️ 订单监控与强杀</h2>
+            <div class="row gap button-row">
+                <button id="fetchOrdersBtn" class="btn btn-orange">🔍 刷新进行中订单</button>
+                <button id="killBtn" class="btn btn-red">⏹ 强杀选中订单</button>
+            </div>
+            <select id="orderCombo" class="order-select">
+                <option value="">暂无订单...</option>
+            </select>
+            <div id="orderMeta" class="order-meta">订单列表会按最近更新时间排序显示。</div>
+        </div>
+
+        <div class="card">
+            <div class="log-head">
+                <h2>📘 用户日志</h2>
+                <button id="toggleDebugBtn" class="btn btn-outline small">显示调试日志</button>
+            </div>
+            <div id="logBox" class="log-box">准备就绪...</div>
+            <div id="debugWrap" class="debug-wrap hidden">
+                <h3>🧪 调试日志</h3>
+                <pre id="debugBox" class="debug-box">暂无调试信息</pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
