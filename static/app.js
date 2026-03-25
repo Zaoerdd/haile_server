@@ -70,6 +70,7 @@ const state = {
         dialogResolver: null,
         reservationRefreshTimer: null,
         reservationRefreshInFlight: false,
+        liveClockTimer: null,
     },
 };
 
@@ -87,6 +88,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindElements();
     bindEvents();
     initOrderObserver();
+    startLiveClock();
     primeInputs();
     renderWash();
     renderReservations();
@@ -290,6 +292,20 @@ function restartReservationAutoRefresh() {
         }
         await loadReservations({ silent: true });
     }, getReservationRefreshDelayMs());
+}
+
+function startLiveClock() {
+    if (state.ui.liveClockTimer) {
+        return;
+    }
+    state.ui.liveClockTimer = window.setInterval(() => {
+        if (state.activeTab === 'washTab' && state.wash.view === 'process' && state.wash.process) {
+            renderWash();
+        }
+        if (state.activeTab === 'orderTab' && (state.orders.activeProcesses.length || state.orders.items.length)) {
+            renderOrders();
+        }
+    }, 1000);
 }
 
 function buildHistoryState() {
@@ -1106,6 +1122,7 @@ function renderWashProcessView() {
                 <div class="callout">
                     <strong>${escapeHtml(order.machineName || '订单设备')}</strong>
                     <p class="body-text">状态：${escapeHtml(order.stateDesc || '--')} ${order.pageCode ? `· ${escapeHtml(order.pageCode)}` : ''}</p>
+                    ${renderOrderTimeGrid(order)}
                 </div>
             ` : ''}
         </section>
@@ -1404,6 +1421,7 @@ function renderActiveProcessCard(process) {
                 <div><span>页面状态</span><span>${escapeHtml(order.pageCode || '--')}</span></div>
                 <div><span>最近更新</span><span>${escapeHtml(formatDateTime(process.updatedAt))}</span></div>
             </div>
+            ${renderOrderTimeGrid(order)}
             ${process.blockedReason ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(process.blockedReason)}</div>` : ''}
             <div class="spacer-sm"></div>
             <div class="action-row">
@@ -1418,6 +1436,7 @@ function renderHistoryOrderCard(order, hasProcess) {
     const expanded = Boolean(state.orders.expanded[order.orderNo]);
     const detail = cache.orderDetails.get(order.orderNo);
     const buttonSwitch = detail ? (detail.buttonSwitch || {}) : {};
+    const timeMeta = getOrderTimeMeta(detail || order);
     return `
         <article class="order-card">
             <div class="card-title">
@@ -1433,6 +1452,8 @@ function renderHistoryOrderCard(order, hasProcess) {
             <div class="detail-grid">
                 <div><span>价格</span><span>${escapeHtml(stringOrFallback(order.price, '--'))}</span></div>
                 <div><span>创建时间</span><span>${escapeHtml(formatDateTime(order.createTime))}</span></div>
+                ${timeMeta ? `<div><span>${escapeHtml(timeMeta.label)}</span><span>${escapeHtml(formatDateTime(timeMeta.value))}</span></div>` : ''}
+                ${timeMeta ? `<div><span>${escapeHtml(timeMeta.countdownLabel)}</span><span>${escapeHtml(timeMeta.countdownText)}</span></div>` : ''}
             </div>
             <div class="spacer-sm"></div>
             <div class="action-row">
@@ -1452,13 +1473,15 @@ function renderOrderDetail(detail) {
             <div class="callout">正在加载订单详情...</div>
         `;
     }
+    const timeMeta = getOrderTimeMeta(detail);
     return `
         <div class="spacer-sm"></div>
         <div class="detail-grid">
             <div><span>状态</span><span>${escapeHtml(detail.stateDesc || '--')}</span></div>
             <div><span>页面状态</span><span>${escapeHtml(detail.pageCode || '--')}</span></div>
             <div><span>支付时间</span><span>${escapeHtml(formatDateTime(detail.payTime))}</span></div>
-            <div><span>失效时间</span><span>${escapeHtml(formatDateTime(detail.invalidTime))}</span></div>
+            <div><span>${escapeHtml(timeMeta ? timeMeta.label : '时间')}</span><span>${escapeHtml(formatDateTime(timeMeta ? timeMeta.value : ''))}</span></div>
+            <div><span>${escapeHtml(timeMeta ? timeMeta.countdownLabel : '当前阶段')}</span><span>${escapeHtml(timeMeta ? timeMeta.countdownText : '--')}</span></div>
             <div><span>洗衣房</span><span>${escapeHtml(detail.shopName || '--')}</span></div>
             <div><span>模式</span><span>${escapeHtml(detail.modeName || '--')}</span></div>
         </div>
@@ -1664,10 +1687,21 @@ async function openProcess(processId, options = {}) {
     renderWashLoading('正在恢复流程...');
     try {
         state.wash.process = await getProcessDetail(processId);
+        const orderNo = state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo) || '';
+        if (orderNo) {
+            try {
+                const detail = await getOrderDetail(orderNo, true);
+                state.wash.process.order = detail;
+                updateOrderFromDetail(orderNo, detail);
+            } catch (error) {
+                handleRequestError(error, '刷新订单详情失败。', true);
+            }
+        }
         state.wash.view = 'process';
         state.wash.result = null;
         state.wash.loading = false;
         renderWash();
+        renderOrders();
         if (options.pushHistory !== false) {
             pushHistoryState();
         }
@@ -1728,7 +1762,10 @@ async function advanceProcess() {
     const data = await apiPost('/api/process/next', { processId: process.processId });
     await openProcess(process.processId, { pushHistory: false });
     await loadActiveProcesses();
-    if ((data.process || {}).completed) {
+    const latestOrderNo = (state.wash.process && (state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo))) || '';
+    if (latestOrderNo) {
+        await loadOrders(true);
+    } else if ((data.process || {}).completed) {
         await loadOrders(true);
     }
     showToastMessage(data.msg || '流程已推进。');
@@ -1947,8 +1984,12 @@ function updateOrderFromDetail(orderNo, detail) {
     }
     item.state = detail.state;
     item.stateDesc = detail.stateDesc;
+    item.pageCode = detail.pageCode;
     item.price = detail.price;
+    item.payTime = detail.payTime;
     item.completeTime = detail.completeTime;
+    item.finishTime = detail.finishTime;
+    item.invalidTime = detail.invalidTime;
 }
 
 async function handleSettingsSubmit(event) {
@@ -2007,6 +2048,150 @@ function fillSelect(select, items, placeholder, selectedValue = '') {
 function getSelectedValue(id) {
     const select = document.getElementById(id);
     return select ? select.value : '';
+}
+
+function parseDateValue(value) {
+    if (!value) {
+        return null;
+    }
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value;
+    }
+    if (typeof value === 'number') {
+        const timestamp = value > 10_000_000_000 ? value : value * 1000;
+        const date = new Date(timestamp);
+        return Number.isNaN(date.getTime()) ? null : date;
+    }
+    const text = String(value).trim();
+    if (!text) {
+        return null;
+    }
+    const candidates = [text, text.replace(' ', 'T')];
+    for (const candidate of candidates) {
+        const date = new Date(candidate);
+        if (!Number.isNaN(date.getTime())) {
+            return date;
+        }
+    }
+    return null;
+}
+
+function formatCountdown(targetTime, expiredLabel = '已到期') {
+    const target = parseDateValue(targetTime);
+    if (!target) {
+        return '--';
+    }
+    const diff = target.getTime() - Date.now();
+    if (diff <= 0) {
+        return expiredLabel;
+    }
+
+    const totalSeconds = Math.floor(diff / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (days > 0) {
+        return `${days}天 ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+function isPendingOrder(order) {
+    const stateCode = Number(order && order.state);
+    const stateDesc = String((order && order.stateDesc) || '');
+    const pageCode = String((order && order.pageCode) || '');
+    const buttonSwitch = (order && order.buttonSwitch) || {};
+    return stateCode === 50
+        || Boolean(buttonSwitch.canPay)
+        || stateDesc.includes('待支付')
+        || stateDesc.includes('待验证')
+        || ['waiting_check', 'place_clothes', 'waiting_choose_ump'].includes(pageCode);
+}
+
+function isRunningOrder(order) {
+    const stateCode = Number(order && order.state);
+    const stateDesc = String((order && order.stateDesc) || '');
+    return stateCode === 500
+        || stateDesc.includes('进行中')
+        || stateDesc.includes('洗衣中')
+        || stateDesc.includes('烘干中')
+        || stateDesc.includes('脱水中');
+}
+
+function isCompletedOrder(order) {
+    const stateCode = Number(order && order.state);
+    const stateDesc = String((order && order.stateDesc) || '');
+    return stateCode === 1000 || stateDesc.includes('完成');
+}
+
+function getOrderTimeMeta(order) {
+    if (!order) {
+        return null;
+    }
+    if (isCompletedOrder(order)) {
+        return {
+            label: '完成时间',
+            value: order.completeTime,
+            countdownLabel: '当前阶段',
+            countdownText: '已完成',
+        };
+    }
+    if (isRunningOrder(order)) {
+        return {
+            label: '预计完成时间',
+            value: order.finishTime,
+            countdownLabel: '当前阶段倒计时',
+            countdownText: formatCountdown(order.finishTime, '已完成'),
+        };
+    }
+    if (isPendingOrder(order)) {
+        return {
+            label: '失效时间',
+            value: order.invalidTime,
+            countdownLabel: '当前阶段倒计时',
+            countdownText: formatCountdown(order.invalidTime, '已失效'),
+        };
+    }
+    if (order.finishTime) {
+        return {
+            label: '预计完成时间',
+            value: order.finishTime,
+            countdownLabel: '当前阶段倒计时',
+            countdownText: formatCountdown(order.finishTime, '已完成'),
+        };
+    }
+    if (order.completeTime) {
+        return {
+            label: '完成时间',
+            value: order.completeTime,
+            countdownLabel: '当前阶段',
+            countdownText: '已完成',
+        };
+    }
+    if (order.invalidTime) {
+        return {
+            label: '失效时间',
+            value: order.invalidTime,
+            countdownLabel: '当前阶段倒计时',
+            countdownText: formatCountdown(order.invalidTime, '已失效'),
+        };
+    }
+    return null;
+}
+
+function renderOrderTimeGrid(order) {
+    const meta = getOrderTimeMeta(order);
+    if (!meta) {
+        return '';
+    }
+    return `
+        <div class="detail-grid">
+            <div><span>${escapeHtml(meta.label)}</span><span>${escapeHtml(formatDateTime(meta.value))}</span></div>
+            <div><span>${escapeHtml(meta.countdownLabel)}</span><span>${escapeHtml(meta.countdownText)}</span></div>
+        </div>
+    `;
 }
 
 function machineChipClass(machine) {
@@ -2101,8 +2286,8 @@ function formatDateTime(value) {
     if (!value) {
         return '--';
     }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
+    const date = parseDateValue(value);
+    if (!date) {
         return String(value);
     }
     return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;

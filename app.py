@@ -223,6 +223,13 @@ def normalize_history_order(order: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def extract_order_finish_time(detail: Dict[str, Any]) -> Any:
+    order_item = (detail.get('orderItemList') or [{}])[0]
+    fulfill_info = detail.get('fulfillInfo') or {}
+    fulfilling_item = fulfill_info.get('fulfillingItem') or {}
+    return fulfilling_item.get('finishTime') or order_item.get('finishTime') or detail.get('finishTime')
+
+
 def normalize_order_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
     order_item = (detail.get('orderItemList') or [{}])[0]
     buttons = detail.get('buttonSwitch') or {}
@@ -235,6 +242,7 @@ def normalize_order_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         'createTime': detail.get('createTime'),
         'payTime': detail.get('payTime'),
         'completeTime': detail.get('completeTime'),
+        'finishTime': extract_order_finish_time(detail),
         'invalidTime': detail.get('invalidTime'),
         'machineName': order_item.get('goodsName') or detail.get('deviceName') or '未知设备',
         'modeName': order_item.get('goodsItemName') or '未知模式',

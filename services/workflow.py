@@ -553,6 +553,8 @@ class WorkflowManager:
     def _normalize_order_summary(self, detail: Dict[str, Any]) -> Dict[str, Any]:
         order_item = (detail.get('orderItemList') or [{}])[0]
         buttons = detail.get('buttonSwitch') or {}
+        fulfill_info = detail.get('fulfillInfo') or {}
+        fulfilling_item = fulfill_info.get('fulfillingItem') or {}
         return {
             'orderNo': detail.get('orderNo'),
             'state': detail.get('state'),
@@ -561,6 +563,9 @@ class WorkflowManager:
             'machineName': order_item.get('goodsName') or detail.get('deviceName') or '',
             'modeName': order_item.get('goodsItemName') or '',
             'createTime': detail.get('createTime'),
+            'payTime': detail.get('payTime'),
+            'completeTime': detail.get('completeTime'),
+            'finishTime': fulfilling_item.get('finishTime') or order_item.get('finishTime') or detail.get('finishTime'),
             'invalidTime': detail.get('invalidTime'),
             'buttonSwitch': {
                 'canCancel': bool(buttons.get('canCancel')),
