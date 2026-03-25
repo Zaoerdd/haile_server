@@ -5,6 +5,14 @@ const TAB_TITLES = {
     settingsTab: '设置',
 };
 
+const PROCESS_STEPS = [
+    { id: 1, label: '解析机器', hint: '确认当前二维码对应的设备信息' },
+    { id: 2, label: '创建订单', hint: '创建待支付订单，订单页可继续流程' },
+    { id: 3, label: '确认放衣', hint: '放入衣物并确认关门' },
+    { id: 4, label: '生成预支付', hint: '准备结算单和支付参数' },
+    { id: 5, label: '支付启动', hint: '执行支付并启动设备' },
+];
+
 const DEFAULT_TOKEN_STATUS = {
     source: 'env',
     configured: false,
@@ -15,10 +23,12 @@ const DEFAULT_TOKEN_STATUS = {
 
 const state = {
     activeTab: 'washTab',
-    tokenStatus: Object.assign({}, DEFAULT_TOKEN_STATUS),
+    tokenStatus: { ...DEFAULT_TOKEN_STATUS },
     security: null,
     scheduler: null,
     settings: null,
+    historyReady: false,
+    historyRestoring: false,
     wash: {
         loading: false,
         rooms: [],
@@ -29,6 +39,7 @@ const state = {
         machineId: null,
         machineDetail: null,
         scanMachine: null,
+        process: null,
         result: null,
     },
     reservations: {
@@ -44,6 +55,7 @@ const state = {
         total: 0,
         loading: false,
         expanded: {},
+        activeProcesses: [],
     },
     ui: {
         toastTimer: null,
@@ -69,22 +81,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderReservations();
     renderOrders();
     renderSettings();
-    switchTab('washTab');
+    switchTab('washTab', { pushHistory: false });
 
     try {
         await loadConfig();
         await loadSettings();
         await loadReservations();
-
         if (isTokenReady()) {
-            await loadLaundrySections();
+            await loadLaundrySections({ showToast: false, preserveView: false });
             await hydrateReservationForm();
         } else {
             renderWash();
             renderOrders();
         }
-    } catch (err) {
-        handleRequestError(err, '初始化失败，请检查服务端日志。');
+    } catch (error) {
+        handleRequestError(error, '初始化失败，请检查服务端日志。');
+    } finally {
+        replaceHistoryState();
+        state.historyReady = true;
     }
 });
 
@@ -128,6 +142,7 @@ function bindElements() {
     el.settingsToken = document.getElementById('settingsToken');
     el.settingsPushplusUrl = document.getElementById('settingsPushplusUrl');
     el.settingsLeadMinutes = document.getElementById('settingsLeadMinutes');
+    el.settingsPollInterval = document.getElementById('settingsPollInterval');
     el.settingsInfo = document.getElementById('settingsInfo');
     el.refreshSettingsBtn = document.getElementById('refreshSettingsBtn');
 }
@@ -142,7 +157,7 @@ function bindEvents() {
             renderWash();
             return;
         }
-        await loadLaundrySections(true);
+        await loadLaundrySections({ showToast: true, preserveView: false });
         await hydrateReservationForm();
     });
 
@@ -155,7 +170,7 @@ function bindEvents() {
             renderOrders();
             return;
         }
-        await loadOrders(true);
+        await refreshOrdersOverview(true);
     });
 
     el.refreshSettingsBtn.addEventListener('click', async () => {
@@ -193,12 +208,20 @@ function bindEvents() {
     el.reservationScheduleType.addEventListener('change', () => {
         toggleReservationScheduleFields();
     });
+
+    window.addEventListener('popstate', event => {
+        const nextState = event.state || buildHistoryState();
+        restoreHistoryState(nextState).catch(error => {
+            handleRequestError(error, '页面恢复失败，已保留当前页面。', true);
+        });
+    });
 }
 
 function initOrderObserver() {
     if (!('IntersectionObserver' in window)) {
         return;
     }
+
     const observer = new IntersectionObserver(async entries => {
         const visible = entries.some(entry => entry.isIntersecting);
         if (!visible) {
@@ -219,7 +242,86 @@ function primeInputs() {
     el.reservationWeeklyTime.value = '08:00';
 }
 
-function switchTab(tabId) {
+function buildHistoryState() {
+    const payload = { tab: state.activeTab };
+    if (state.activeTab !== 'washTab') {
+        return payload;
+    }
+
+    payload.washView = state.wash.view;
+    if (state.wash.roomId) {
+        payload.roomId = state.wash.roomId;
+    }
+    if (state.wash.machineId) {
+        payload.machineId = state.wash.machineId;
+    }
+    if (state.wash.scanMachine && state.wash.scanMachine.qrCode) {
+        payload.qrCode = state.wash.scanMachine.qrCode;
+    }
+    if (state.wash.process && state.wash.process.processId) {
+        payload.processId = state.wash.process.processId;
+    }
+    return payload;
+}
+
+function pushHistoryState() {
+    if (!state.historyReady || state.historyRestoring) {
+        return;
+    }
+    window.history.pushState(buildHistoryState(), '');
+}
+
+function replaceHistoryState() {
+    window.history.replaceState(buildHistoryState(), '');
+}
+
+async function restoreHistoryState(navState) {
+    state.historyRestoring = true;
+    try {
+        const tab = navState && navState.tab ? navState.tab : 'washTab';
+        switchTab(tab, { pushHistory: false });
+
+        if (tab !== 'washTab') {
+            return;
+        }
+
+        const washView = navState && navState.washView ? navState.washView : 'home';
+        if (!isTokenReady()) {
+            state.wash.view = 'home';
+            renderWash();
+            return;
+        }
+
+        if (washView === 'home') {
+            state.wash.view = 'home';
+            renderWash();
+            return;
+        }
+        if (washView === 'room' && navState.roomId) {
+            await openRoom(navState.roomId, { pushHistory: false });
+            return;
+        }
+        if (washView === 'machine' && navState.machineId) {
+            await openMachine(navState.machineId, { pushHistory: false, roomId: navState.roomId || null });
+            return;
+        }
+        if (washView === 'scan' && navState.qrCode) {
+            await openScanMachine(navState.qrCode, { pushHistory: false });
+            return;
+        }
+        if (washView === 'process' && navState.processId) {
+            await openProcess(navState.processId, { pushHistory: false });
+            return;
+        }
+
+        state.wash.view = 'home';
+        renderWash();
+    } finally {
+        state.historyRestoring = false;
+    }
+}
+
+function switchTab(tabId, options = {}) {
     state.activeTab = tabId;
     el.tabPanels.forEach(panel => {
         panel.classList.toggle('active', panel.id === tabId);
@@ -229,8 +331,16 @@ function switchTab(tabId) {
     });
     el.pageTitle.textContent = TAB_TITLES[tabId] || '海乐洗衣助手';
 
-    if (tabId === 'orderTab' && isTokenReady() && !state.orders.items.length && !state.orders.loading) {
-        loadOrders(true).catch(err => handleRequestError(err, '加载订单失败。'));
+    if (options.pushHistory !== false) {
+        pushHistoryState();
+    }
+
+    if (tabId === 'orderTab' && isTokenReady() && !state.orders.loading) {
+        if (!state.orders.items.length && !state.orders.activeProcesses.length) {
+            refreshOrdersOverview(true).catch(error => handleRequestError(error, '读取订单失败。'));
+        } else {
+            loadActiveProcesses().catch(error => handleRequestError(error, '刷新流程列表失败。', true));
+        }
     }
 }
 
@@ -244,13 +354,24 @@ function normalizeTokenStatus(tokenStatus = {}) {
     };
 }
 
+function applyTokenStatus(tokenStatus, notify = false) {
+    state.tokenStatus = normalizeTokenStatus(tokenStatus);
+    el.topStatus.className = `status-pill ${tokenClassName(state.tokenStatus.reason)}`;
+    el.topStatus.textContent = tokenLabel();
+    updateFormAvailability();
+
+    if (notify && !isTokenReady()) {
+        notifyTokenProblem();
+    }
+}
+
 function isTokenReady() {
     return state.tokenStatus.valid && state.tokenStatus.reason === 'ok';
 }
 
 function getTokenAlertMessage() {
     if (state.tokenStatus.reason === 'missing') {
-        return state.tokenStatus.message || '当前没有可用 Token，请到设置页填写或检查 .env。';
+        return state.tokenStatus.message || '当前没有可用 Token，请到设置页填写。';
     }
     if (state.tokenStatus.reason === 'invalid') {
         return state.tokenStatus.message || 'Token 已失效，请更新后重试。';
@@ -284,17 +405,6 @@ function tokenLabel() {
     return '未配置 Token';
 }
 
-function applyTokenStatus(tokenStatus, notify = false) {
-    state.tokenStatus = normalizeTokenStatus(tokenStatus);
-    el.topStatus.className = `status-pill ${tokenClassName(state.tokenStatus.reason)}`;
-    el.topStatus.textContent = tokenLabel();
-    updateFormAvailability();
-
-    if (notify && !isTokenReady()) {
-        notifyTokenProblem();
-    }
-}
-
 function notifyTokenProblem(force = false) {
     const reason = state.tokenStatus.reason;
     if (!force && state.ui.tokenAlertReason === reason) {
@@ -314,24 +424,19 @@ function ensureTokenReady() {
 }
 
 function updateFormAvailability() {
-    const shouldDisable = !isTokenReady();
+    const disableTokenRequired = !isTokenReady();
     Array.from(el.reservationForm.elements).forEach(field => {
-        field.disabled = shouldDisable;
+        field.disabled = disableTokenRequired;
     });
-    el.refreshWashBtn.disabled = shouldDisable;
-    el.refreshOrdersBtn.disabled = shouldDisable;
-    el.loadMoreOrdersBtn.disabled = shouldDisable || !state.orders.hasMore;
-}
-
-function setWashLoading(message) {
-    state.wash.loading = true;
-    el.washView.innerHTML = `<div class="panel-card loading-card">${escapeHtml(message)}</div>`;
+    el.refreshWashBtn.disabled = disableTokenRequired;
+    el.refreshOrdersBtn.disabled = disableTokenRequired;
+    el.loadMoreOrdersBtn.disabled = disableTokenRequired || !state.orders.hasMore;
 }
 
 async function loadConfig() {
     const data = await apiGet('/api/config');
     state.security = data.security || null;
-    state.scheduler = data.scheduler || state.scheduler;
+    state.scheduler = data.scheduler || null;
     state.wash.scanMachines = data.scanMachines || [];
     applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
 }
@@ -346,35 +451,37 @@ async function loadSettings() {
         el.settingsToken.value = state.settings.token || '';
         el.settingsPushplusUrl.value = state.settings.pushplusUrl || '';
         el.settingsLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
+        el.settingsPollInterval.value = state.settings.reservationPollIntervalSeconds || 30;
         el.reservationLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
     }
-
     renderSettings();
 }
 
-async function loadLaundrySections(showToast = false) {
-    setWashLoading('正在加载洗衣房和扫码机组...');
+async function loadLaundrySections({ showToast = false, preserveView = false } = {}) {
+    state.wash.loading = true;
+    if (!preserveView) {
+        state.wash.view = 'home';
+        renderWashLoading('正在加载洗衣房和扫码机组...');
+    }
+
     try {
         const data = await apiGet('/api/laundry/sections');
         state.wash.rooms = data.rooms || [];
         state.wash.scanMachines = data.scanMachines || state.wash.scanMachines;
-        state.wash.view = 'home';
-        state.wash.roomId = null;
-        state.wash.roomData = null;
-        state.wash.machineId = null;
-        state.wash.machineDetail = null;
-        state.wash.scanMachine = null;
         state.wash.loading = false;
+        if (!preserveView) {
+            clearWashTransientState();
+            state.wash.view = 'home';
+        }
         renderWash();
         if (showToast) {
             showToastMessage('洗衣页面已刷新。');
         }
-    } catch (err) {
-        syncTokenFailure(err);
-        state.wash.rooms = [];
+    } catch (error) {
+        syncTokenFailure(error);
         state.wash.loading = false;
         renderWash();
-        throw err;
+        throw error;
     }
 }
 
@@ -383,6 +490,26 @@ async function loadReservations() {
     state.reservations.items = data.items || [];
     state.scheduler = data.scheduler || state.scheduler;
     renderReservations();
+}
+
+async function loadActiveProcesses() {
+    if (!isTokenReady()) {
+        state.orders.activeProcesses = [];
+        renderOrders();
+        return;
+    }
+    try {
+        const data = await apiGet('/api/processes/active');
+        state.orders.activeProcesses = data.items || [];
+        renderOrders();
+    } catch (error) {
+        syncTokenFailure(error);
+        handleRequestError(error, '读取待继续流程失败。', true);
+    }
+}
+
+async function refreshOrdersOverview(reset) {
+    await Promise.all([loadOrders(reset), loadActiveProcesses()]);
 }
 
 async function loadOrders(reset) {
@@ -400,6 +527,7 @@ async function loadOrders(reset) {
         state.orders.items = [];
         state.orders.page = 0;
         state.orders.hasMore = true;
+        state.orders.expanded = {};
         renderOrders();
     }
 
@@ -412,10 +540,9 @@ async function loadOrders(reset) {
         state.orders.page = data.page || nextPage;
         state.orders.total = data.total || state.orders.items.length;
         state.orders.hasMore = Boolean(data.hasMore);
-        renderOrders();
-    } catch (err) {
-        syncTokenFailure(err);
-        handleRequestError(err, '读取订单失败。', true);
+    } catch (error) {
+        syncTokenFailure(error);
+        handleRequestError(error, '读取订单失败。', true);
     } finally {
         state.orders.loading = false;
         renderOrders();
@@ -459,6 +586,11 @@ async function getOrderDetail(orderNo, forceRefresh = false) {
     return data.order;
 }
 
+async function getProcessDetail(processId) {
+    const data = await apiGet(`/api/processes/${encodeURIComponent(processId)}`);
+    return data.process;
+}
+
 async function hydrateReservationForm() {
     populateReservationScanOptions();
     populateReservationRoomOptions();
@@ -468,10 +600,9 @@ async function hydrateReservationForm() {
 }
 
 function populateReservationScanOptions() {
-    const items = state.wash.scanMachines || [];
     fillSelect(
         el.reservationScanMachine,
-        items.map(machine => ({
+        (state.wash.scanMachines || []).map(machine => ({
             value: machine.qrCode,
             label: machine.label,
         })),
@@ -480,10 +611,9 @@ function populateReservationScanOptions() {
 }
 
 function populateReservationRoomOptions() {
-    const rooms = state.wash.rooms || [];
     fillSelect(
         el.reservationRoom,
-        rooms.map(room => ({
+        (state.wash.rooms || []).map(room => ({
             value: room.id,
             label: room.name,
         })),
@@ -500,7 +630,7 @@ async function refreshReservationMachineOptions() {
     }
 
     if (el.reservationSource.value === 'scan') {
-        fillSelect(el.reservationMachine, [], '扫码机组不需要选择洗衣机');
+        fillSelect(el.reservationMachine, [], '扫码机组无需额外选择设备');
         await refreshReservationModes();
         return;
     }
@@ -513,20 +643,20 @@ async function refreshReservationMachineOptions() {
 
     try {
         const payload = await getRoomMachines(roomId);
-        const machines = (payload.machines || []).filter(machine => machine.supportsVirtualScan);
+        const machines = (payload.machines || []).filter(machine => machine.supportsVirtualScan && machine.scanCode);
         state.reservations.roomMachines = machines;
         fillSelect(
             el.reservationMachine,
             machines.map(machine => ({
                 value: machine.goodsId,
-                label: `${machine.name} · ${machine.stateDesc}`,
+                label: `${machine.name} · ${machine.statusDetail || machine.stateDesc}`,
             })),
             machines.length ? '请选择洗衣机' : '当前洗衣房暂无可预约机器'
         );
         await refreshReservationModes();
-    } catch (err) {
-        syncTokenFailure(err);
-        handleRequestError(err, '加载预约机器失败。', true);
+    } catch (error) {
+        syncTokenFailure(error);
+        handleRequestError(error, '加载预约机器失败。', true);
     }
 }
 
@@ -543,8 +673,7 @@ async function refreshReservationModes() {
             if (!qrCode) {
                 return;
             }
-            const modes = await getScanModes(qrCode);
-            populateReservationModeOptions(modes);
+            populateReservationModeOptions(await getScanModes(qrCode));
             return;
         }
 
@@ -555,9 +684,9 @@ async function refreshReservationModes() {
         const detail = await getMachineDetail(goodsId);
         const modes = (detail.modes || []).filter(() => detail.supportsVirtualScan);
         populateReservationModeOptions(modes);
-    } catch (err) {
-        syncTokenFailure(err);
-        handleRequestError(err, '读取预约模式失败。', true);
+    } catch (error) {
+        syncTokenFailure(error);
+        handleRequestError(error, '读取预约模式失败。', true);
     }
 }
 
@@ -587,437 +716,595 @@ function toggleReservationScheduleFields() {
     el.reservationWeeklyTimeWrap.classList.toggle('hidden', isOnce);
 }
 
-function renderWash() {
-    if (state.wash.loading) {
-        return;
-    }
-
-    if (!isTokenReady()) {
-        el.washView.innerHTML = [
-            renderStatusCard('danger', '洗衣功能暂不可用', getTokenAlertMessage(), `<div class="action-row"><button class="btn btn-primary" data-action="goto-settings">去设置</button></div>`),
-            renderMachineGroupIntro(),
-        ].join('');
-        return;
-    }
-
-    if (state.wash.view === 'room' && state.wash.roomData) {
-        el.washView.innerHTML = renderRoomView();
-        return;
-    }
-
-    if (state.wash.view === 'machine' && state.wash.machineDetail) {
-        el.washView.innerHTML = renderMachineView();
-        return;
-    }
-
-    if (state.wash.view === 'scan' && state.wash.scanMachine) {
-        el.washView.innerHTML = renderScanView();
-        return;
-    }
-
-    el.washView.innerHTML = renderWashHome();
+function clearWashTransientState() {
+    state.wash.roomId = null;
+    state.wash.roomData = null;
+    state.wash.machineId = null;
+    state.wash.machineDetail = null;
+    state.wash.scanMachine = null;
+    state.wash.process = null;
+    state.wash.result = null;
 }
 
-function renderWashHome() {
-    const roomCards = (state.wash.rooms || []).map(room => `
-        <article class="list-card">
+function renderWashLoading(message) {
+    el.washView.innerHTML = `<div class="panel-card loading-card">${escapeHtml(message)}</div>`;
+}
+
+function renderWash() {
+    if (!isTokenReady()) {
+        el.washView.innerHTML = renderStatusCard('warning', '需要可用 Token', getTokenAlertMessage(), `
+            <div class="spacer-sm"></div>
+            <button class="btn btn-primary full-width" type="button" data-action="goto-settings">去设置</button>
+        `);
+        return;
+    }
+
+    if (state.wash.loading) {
+        renderWashLoading('正在加载中...');
+        return;
+    }
+
+    if (state.wash.view === 'room') {
+        el.washView.innerHTML = renderWashRoomView();
+        return;
+    }
+    if (state.wash.view === 'machine') {
+        el.washView.innerHTML = renderWashMachineView();
+        return;
+    }
+    if (state.wash.view === 'scan') {
+        el.washView.innerHTML = renderWashScanView();
+        return;
+    }
+    if (state.wash.view === 'process') {
+        el.washView.innerHTML = renderWashProcessView();
+        return;
+    }
+
+    el.washView.innerHTML = renderWashHomeView();
+}
+
+function renderWashHomeView() {
+    const rooms = state.wash.rooms || [];
+    const scanMachines = state.wash.scanMachines || [];
+    return `
+        <section class="panel-card">
             <div class="card-title">
                 <div>
-                    <h3>${escapeHtml(room.name)}</h3>
-                    <p>${escapeHtml(room.address || '暂无地址信息')}</p>
+                    <h3>洗衣房</h3>
+                    <p>按房间查看在线设备状态、剩余空闲数和预计完成时间。</p>
                 </div>
-                <span class="chip ${room.enableReserve ? 'success' : 'pending'}">${room.enableReserve ? '可预约' : '普通机房'}</span>
+                <span class="chip pending">${rooms.length} 个</span>
+            </div>
+            <div class="room-list">
+                ${rooms.length ? rooms.map(renderRoomCard).join('') : renderEmptyState('暂无洗衣房', '当前没有可用洗衣房数据。')}
+            </div>
+        </section>
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>扫码机组</h3>
+                    <p>从本地机组直接进入虚拟扫码流程，手动逐步确认支付。</p>
+                </div>
+                <span class="chip warning">${scanMachines.length} 台</span>
+            </div>
+            <div class="scan-list">
+                ${scanMachines.length ? scanMachines.map(renderScanMachineCard).join('') : renderEmptyState('暂无扫码机组', '请检查 machines.json 是否已配置。')}
+            </div>
+        </section>
+    `;
+}
+
+function renderWashRoomView() {
+    const payload = state.wash.roomData || {};
+    const room = payload.room || {};
+    const machines = payload.machines || [];
+    return `
+        <section class="panel-card">
+            <div class="action-row">
+                <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="card-title">
+                <div>
+                    <h3>${escapeHtml(room.name || '洗衣房')}</h3>
+                    <p>${escapeHtml(room.address || '暂无地址')}</p>
+                </div>
+                <span class="chip pending">${machines.length} 台</span>
             </div>
             <div class="detail-grid">
-                <div><span>空闲设备</span><span>${escapeHtml(stringOrFallback(room.idleCount, '--'))}</span></div>
-                <div><span>预约数量</span><span>${escapeHtml(stringOrFallback(room.reserveNum, '--'))}</span></div>
+                <div><span>空闲数</span><span>${escapeHtml(stringOrFallback(room.idleCount, '--'))}</span></div>
+                <div><span>预约数</span><span>${escapeHtml(stringOrFallback(room.reserveNum, '--'))}</span></div>
             </div>
-            <div class="spacer-sm"></div>
-            <div class="action-row">
-                <button class="btn btn-secondary" data-action="open-room" data-room-id="${escapeHtml(room.id)}">查看设备</button>
-            </div>
-        </article>
-    `).join('');
-
-    const scanCards = (state.wash.scanMachines || []).map(machine => `
-        <article class="list-card">
+        </section>
+        <section class="panel-card">
             <div class="card-title">
                 <div>
-                    <h3>${escapeHtml(machine.label)}</h3>
-                    <p>二维码编号：${escapeHtml(maskCode(machine.qrCode))}</p>
+                    <h3>设备列表</h3>
+                    <p>运行中的设备会直接显示预计完成时间。</p>
                 </div>
-                <span class="chip success">虚拟扫码</span>
             </div>
-            <div class="action-row">
-                <button class="btn btn-primary" data-action="open-scan" data-qr-code="${escapeHtml(machine.qrCode)}">立即下单</button>
+            <div class="machine-list">
+                ${machines.length ? machines.map(renderRoomMachineCard).join('') : renderEmptyState('暂无设备', '这个洗衣房当前没有可显示的设备。')}
             </div>
-        </article>
-    `).join('');
-
-    return [
-        renderStatusCard('success', '服务端 Token 可用', state.tokenStatus.message),
-        `
-            <section class="sheet-card">
-                <h3 class="section-title">洗衣房</h3>
-                <p class="section-subtitle">先选洗衣房，再进入洗衣机列表做线上下单或虚拟扫码。</p>
-                <div class="room-list">
-                    ${roomCards || renderEmptyState('当前没有可用洗衣房', '稍后刷新，或检查定位与接口返回。')}
-                </div>
-            </section>
-        `,
-        `
-            <section class="sheet-card">
-                <h3 class="section-title">扫码机组</h3>
-                <p class="section-subtitle">直接使用本地 machine.json 的编号走完整扫码支付流程。</p>
-                <div class="scan-list">
-                    ${scanCards || renderEmptyState('当前没有扫码机组配置', '请检查 machine.json 是否已配置。')}
-                </div>
-            </section>
-        `,
-        state.wash.result ? renderWashResult() : '',
-    ].join('');
+        </section>
+    `;
 }
 
-function renderRoomView() {
-    const room = state.wash.roomData.room;
-    const machines = state.wash.roomData.machines || [];
-    const machineCards = machines.map(machine => `
-        <article class="machine-card">
-            <div class="card-title">
-                <div>
-                    <h3>${escapeHtml(machine.name)}</h3>
-                    <p>${escapeHtml(machine.floorCode || '默认楼层')}</p>
-                </div>
-                <span class="chip ${machine.state === 1 ? 'success' : machine.state === 2 ? 'warning' : 'danger'}">${escapeHtml(machine.stateDesc)}</span>
-            </div>
-            <div class="inline-row">
-                ${machine.supportsVirtualScan ? '<span class="chip success">支持虚拟扫码</span>' : '<span class="chip pending">仅可线上建单</span>'}
-                ${machine.enableReserve ? '<span class="chip success">接口标记可预约</span>' : ''}
-            </div>
-            <div class="spacer-sm"></div>
-            <div class="action-row">
-                <button class="btn btn-secondary" data-action="open-machine" data-goods-id="${escapeHtml(machine.goodsId)}">查看详情</button>
-            </div>
-        </article>
-    `).join('');
-
-    return [
-        `
-            <div class="action-row">
-                <button class="btn btn-light" data-action="back-home">返回全部入口</button>
-            </div>
-        `,
-        `
-            <section class="sheet-card">
-                <div class="card-title">
-                    <div>
-                        <h3>${escapeHtml(room.name)}</h3>
-                        <p>${escapeHtml(room.address || '暂无地址信息')}</p>
-                    </div>
-                    <span class="chip pending">${escapeHtml(String(machines.length))} 台设备</span>
-                </div>
-                <div class="machine-list">
-                    ${machineCards || renderEmptyState('这个洗衣房暂时没有设备', '可以返回上一层重新选择。')}
-                </div>
-            </section>
-        `,
-        state.wash.result ? renderWashResult() : '',
-    ].join('');
-}
-
-function renderMachineView() {
+function renderWashMachineView() {
     const machine = state.wash.machineDetail;
-    const modes = machine.modes || [];
-    const selectOptions = modes.map(mode => `<option value="${escapeHtml(String(mode.id))}">${escapeHtml(`${mode.label} · ${mode.price} 元`)}</option>`).join('');
-    const virtualScanDisabled = !machine.supportsVirtualScan;
+    if (!machine) {
+        return renderEmptyState('设备未找到', '请返回上一页重新选择设备。');
+    }
 
-    return [
-        `
+    const modeOptions = (machine.modes || []).map(mode => ({
+        value: String(mode.id),
+        label: `${mode.label} · ${mode.price} 元`,
+    }));
+    return `
+        <section class="panel-card">
             <div class="action-row">
-                <button class="btn btn-light" data-action="back-room">返回设备列表</button>
+                <button class="btn btn-light" type="button" data-action="back-room">返回设备列表</button>
+                <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
             </div>
-        `,
-        `
-            <section class="sheet-card">
-                <div class="card-title">
-                    <div>
-                        <h3>${escapeHtml(machine.name)}</h3>
-                        <p>${escapeHtml(machine.shopName || '暂无所属洗衣房信息')}</p>
-                    </div>
-                    <span class="chip ${machine.supportsVirtualScan ? 'success' : 'warning'}">${machine.supportsVirtualScan ? '支持虚拟扫码' : '仅线上下单'}</span>
+            <div class="spacer-sm"></div>
+            <div class="card-title">
+                <div>
+                    <h3>${escapeHtml(machine.name || '设备')}</h3>
+                    <p>${escapeHtml(machine.shopName || machine.shopAddress || '暂无洗衣房信息')}</p>
                 </div>
-                <div class="detail-grid">
-                    <div><span>设备编号</span><span>${escapeHtml(machine.code || '--')}</span></div>
-                    <div><span>商品编号</span><span>${escapeHtml(machine.goodsId || '--')}</span></div>
-                    <div><span>类别</span><span>${escapeHtml(machine.categoryCode || '--')}</span></div>
-                    <div><span>预约标记</span><span>${machine.enableReserve ? '是' : '否'}</span></div>
-                </div>
-                <div class="mode-select">
-                    <label>
-                        选择模式
-                        <select id="washModeSelect">
-                            ${selectOptions || '<option value="">暂无模式</option>'}
-                        </select>
-                    </label>
-                </div>
-                <div class="spacer-sm"></div>
-                <div class="action-row">
-                    <button class="btn btn-secondary" data-action="create-lock-order" ${modes.length ? '' : 'disabled'}>线上下单</button>
-                    <button class="btn btn-primary" data-action="create-scan-order" ${virtualScanDisabled || !modes.length ? 'disabled' : ''}>虚拟扫码下单</button>
-                </div>
-                ${virtualScanDisabled ? '<div class="spacer-sm"></div><div class="callout warning">这个设备当前没有 machine.json 对应编号，本期只能做到线上创建订单，后续支付链路保持 TODO。</div>' : ''}
-            </section>
-        `,
-        state.wash.result ? renderWashResult() : '',
-    ].join('');
+                <span class="chip ${machine.supportsVirtualScan ? 'success' : 'pending'}">${machine.supportsVirtualScan ? '支持虚拟扫码' : '仅线上选机'}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>设备编号</span><span>${escapeHtml(machine.goodsId || '--')}</span></div>
+                <div><span>设备类型</span><span>${escapeHtml(machine.categoryCode || '--')}</span></div>
+            </div>
+            <label class="mode-select">
+                选择模式
+                ${renderSelect('washModeSelect', modeOptions, '请选择模式')}
+            </label>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-secondary" type="button" data-action="create-lock-order">线上下单（到创建订单）</button>
+                ${machine.supportsVirtualScan && machine.scanCode ? '<button class="btn btn-primary" type="button" data-action="open-machine-scan">虚拟扫码手动流程</button>' : ''}
+            </div>
+        </section>
+        ${renderWashResult()}
+    `;
 }
 
-function renderScanView() {
+function renderWashScanView() {
     const machine = state.wash.scanMachine;
-    const modes = machine.modes || [];
-    const selectOptions = modes.map(mode => `<option value="${escapeHtml(String(mode.id))}">${escapeHtml(`${mode.label} · ${mode.price} 元`)}</option>`).join('');
+    if (!machine) {
+        return renderEmptyState('扫码机组未找到', '请返回洗衣首页重新选择扫码机组。');
+    }
 
-    return [
-        `
+    const modeOptions = (machine.modes || []).map(mode => ({
+        value: String(mode.id),
+        label: `${mode.label} · ${mode.price} 元`,
+    }));
+    return `
+        <section class="panel-card">
             <div class="action-row">
-                <button class="btn btn-light" data-action="back-home">返回全部入口</button>
+                <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
             </div>
-        `,
-        `
-            <section class="sheet-card">
-                <div class="card-title">
-                    <div>
-                        <h3>${escapeHtml(machine.label)}</h3>
-                        <p>二维码编号：${escapeHtml(maskCode(machine.qrCode))}</p>
-                    </div>
-                    <span class="chip success">完整扫码流程</span>
+            <div class="spacer-sm"></div>
+            <div class="card-title">
+                <div>
+                    <h3>${escapeHtml(machine.label || '扫码机组')}</h3>
+                    <p>二维码编号：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
                 </div>
-                <label>
-                    选择模式
-                    <select id="scanModeSelect">
-                        ${selectOptions || '<option value="">暂无模式</option>'}
-                    </select>
-                </label>
+                <span class="chip warning">手动流程</span>
+            </div>
+            <label class="mode-select">
+                选择模式
+                ${renderSelect('scanModeSelect', modeOptions, '请选择模式')}
+            </label>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-primary" type="button" data-action="start-scan-process">开始手动流程</button>
+            </div>
+        </section>
+        ${renderWashResult()}
+    `;
+}
+
+function renderWashProcessView() {
+    const process = state.wash.process;
+    if (!process) {
+        return renderEmptyState('流程不存在', '请从扫码机组重新开始，或到订单页继续已有流程。');
+    }
+
+    const currentStep = Number(process.currentStep || 1);
+    const order = process.order || null;
+    const orderNo = process.orderNo || ((process.contextSummary || {}).orderNo) || '';
+    const stepList = PROCESS_STEPS.map(step => {
+        let className = 'pending';
+        let text = '待执行';
+        if (process.completed || currentStep > step.id) {
+            className = 'success';
+            text = '完成';
+        } else if (!process.completed && !process.terminated && currentStep === step.id) {
+            className = 'warning';
+            text = '当前';
+        } else if (process.terminated) {
+            className = 'danger';
+            text = '中止';
+        }
+        return `
+            <div class="process-step ${className}">
+                <div>
+                    <strong>${step.id}. ${escapeHtml(step.label)}</strong>
+                    <p>${escapeHtml(step.hint)}</p>
+                </div>
+                <span class="chip ${className}">${text}</span>
+            </div>
+        `;
+    }).join('');
+
+    const summaryCard = process.terminated
+        ? renderStatusCard('danger', '流程已终止', process.blockedReason || '当前流程无法继续。')
+        : process.completed
+            ? renderStatusCard('success', '流程已完成', '订单已经支付并启动。')
+            : renderStatusCard('warning', '手动扫码流程', `当前步骤：${process.currentStepLabel || '待执行'}`);
+
+    return `
+        ${summaryCard}
+        <section class="panel-card">
+            <div class="action-row">
+                <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
+                <button class="btn btn-light" type="button" data-action="goto-orders">去订单页</button>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="detail-grid">
+                <div><span>流程编号</span><span>${escapeHtml(maskCode(process.processId || ''))}</span></div>
+                <div><span>二维码编号</span><span>${escapeHtml(maskCode(process.qrCode || ''))}</span></div>
+                <div><span>订单号</span><span>${escapeHtml(orderNo || '--')}</span></div>
+                <div><span>最近更新</span><span>${escapeHtml(formatDateTime(process.updatedAt))}</span></div>
+            </div>
+            ${order ? `
                 <div class="spacer-sm"></div>
-                <div class="action-row">
-                    <button class="btn btn-primary" data-action="create-scan-order" ${modes.length ? '' : 'disabled'}>开始扫码下单并支付</button>
+                <div class="callout">
+                    <strong>${escapeHtml(order.machineName || '订单设备')}</strong>
+                    <p class="body-text">状态：${escapeHtml(order.stateDesc || '--')} ${order.pageCode ? `· ${escapeHtml(order.pageCode)}` : ''}</p>
                 </div>
-            </section>
-        `,
-        state.wash.result ? renderWashResult() : '',
-    ].join('');
+            ` : ''}
+        </section>
+        <section class="panel-card">
+            <h3>执行步骤</h3>
+            <div class="spacer-sm"></div>
+            <div class="process-step-list">${stepList}</div>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">下一步：${escapeHtml(process.currentStepLabel || '继续')}</button>` : ''}
+                <button class="btn btn-light" type="button" data-action="goto-orders">去订单页继续</button>
+                <button class="btn btn-danger" type="button" data-action="reset-process">放弃流程</button>
+            </div>
+        </section>
+    `;
 }
 
 function renderWashResult() {
+    if (!state.wash.result) {
+        return '';
+    }
+
     const result = state.wash.result;
-    const order = result.order;
-    const orderInfo = order ? `
-        <div class="detail-grid">
-            <div><span>订单号</span><span>${escapeHtml(order.orderNo || '--')}</span></div>
-            <div><span>状态</span><span>${escapeHtml(order.stateDesc || '--')}</span></div>
-            <div><span>设备</span><span>${escapeHtml(order.machineName || '--')}</span></div>
-            <div><span>模式</span><span>${escapeHtml(order.modeName || '--')}</span></div>
-        </div>
-    ` : '';
-    const todo = result.todo ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(result.todo.nextStep || '后续步骤待补齐。')}</div>` : '';
-    return renderStatusCard(result.variant, result.title, result.message, `${orderInfo}${todo}`);
-}
-
-function renderMachineGroupIntro() {
-    const scanCards = (state.wash.scanMachines || []).map(machine => `
-        <article class="list-card">
-            <div class="card-title">
-                <div>
-                    <h3>${escapeHtml(machine.label)}</h3>
-                    <p>二维码编号：${escapeHtml(maskCode(machine.qrCode))}</p>
-                </div>
-                <span class="chip pending">待配置 Token</span>
-            </div>
-        </article>
-    `).join('');
-
     return `
-        <section class="sheet-card">
-            <h3 class="section-title">已识别的扫码机组</h3>
-            <p class="section-subtitle">Token 恢复可用后，就可以直接从这里发起完整扫码流程。</p>
-            <div class="scan-list">
-                ${scanCards || renderEmptyState('当前没有扫码机组配置', '请检查 machine.json 是否已配置。')}
+        <section class="status-card ${escapeHtml(result.variant || 'warning')}">
+            <div class="status-title">
+                <span>${escapeHtml(result.title || '操作结果')}</span>
+                <span class="chip ${escapeHtml(result.variant || 'warning')}">${escapeHtml(variantLabel(result.variant || 'warning'))}</span>
             </div>
+            <p class="body-text">${escapeHtml(result.message || '')}</p>
+            ${result.order ? `
+                <div class="spacer-sm"></div>
+                <div class="detail-grid">
+                    <div><span>订单号</span><span>${escapeHtml(result.order.orderNo || '--')}</span></div>
+                    <div><span>订单状态</span><span>${escapeHtml(result.order.stateDesc || '--')}</span></div>
+                </div>
+            ` : ''}
+            ${result.todo ? `
+                <div class="spacer-sm"></div>
+                <div class="callout warning">${escapeHtml(result.todo.nextStep || '后续支付链路待补充。')}</div>
+            ` : ''}
         </section>
     `;
 }
 
 function renderReservations() {
-    const schedulerCard = renderSchedulerCard();
-    const tokenCard = !isTokenReady()
-        ? renderStatusCard('warning', '预约建单当前不可用', '本地任务列表仍可查看，但创建任务和模式加载需要可用 Token。')
-        : '';
-
-    const items = (state.reservations.items || []).map(task => {
-        const canPause = task.status === 'scheduled' || task.status === 'holding';
-        const canResume = task.status === 'paused';
-        const lastEvent = task.lastEvent ? `${task.lastEvent.message || ''}` : '暂无执行记录';
-        return `
-            <article class="list-card">
-                <div class="card-title">
-                    <div>
-                        <h3>${escapeHtml(task.title)}</h3>
-                        <p>${escapeHtml(task.machineName)} · ${escapeHtml(task.modeName)}</p>
-                    </div>
-                    <span class="chip ${reservationStatusClass(task.status)}">${escapeHtml(reservationStatusLabel(task.status))}</span>
+    const items = state.reservations.items || [];
+    const scheduler = state.scheduler || {};
+    el.reservationList.innerHTML = `
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>调度器状态</h3>
+                    <p>轮询间隔可以在设置页调整，修改后立即生效。</p>
                 </div>
-                <div class="detail-grid">
-                    <div><span>预约类型</span><span>${escapeHtml(task.scheduleType === 'weekly' ? '每周固定时间' : '单次')}</span></div>
-                    <div><span>目标时间</span><span>${escapeHtml(formatDateTime(task.targetTime))}</span></div>
-                    <div><span>建单窗口</span><span>${escapeHtml(formatWindow(task.startAt, task.holdUntil))}</span></div>
-                    <div><span>当前订单</span><span>${escapeHtml(task.activeOrderNo || '--')}</span></div>
+                <span class="chip ${scheduler.running ? 'success' : 'danger'}">${scheduler.running ? '运行中' : '已停止'}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>轮询间隔</span><span>${escapeHtml(stringOrFallback(scheduler.intervalSeconds, '--'))} 秒</span></div>
+                <div><span>最近轮询</span><span>${escapeHtml(formatDateTime(scheduler.lastTickAt))}</span></div>
+                <div><span>最近创建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).created, 0))}</span></div>
+                <div><span>最近补建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).recreated, 0))}</span></div>
+            </div>
+            ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
+        </section>
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>预约任务</h3>
+                    <p>手动结束订单后，任务会自动暂停，不会继续补单。</p>
                 </div>
-                ${task.lastError ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(task.lastError)}</div>` : ''}
-                <div class="spacer-sm"></div>
-                <div class="callout">${escapeHtml(lastEvent)}</div>
-                <div class="spacer-sm"></div>
-                <div class="action-row">
-                    ${canPause ? `<button class="btn btn-light" data-action="pause-reservation" data-task-id="${task.id}">暂停</button>` : ''}
-                    ${canResume ? `<button class="btn btn-secondary" data-action="resume-reservation" data-task-id="${task.id}">恢复</button>` : ''}
-                    <button class="btn btn-danger" data-action="delete-reservation" data-task-id="${task.id}">删除</button>
-                </div>
-            </article>
-        `;
-    }).join('');
-
-    el.reservationList.innerHTML = [
-        schedulerCard,
-        tokenCard,
-        items || renderEmptyState('还没有预约任务', '你可以先在上方创建单次或每周预约。'),
-    ].join('');
+                <span class="chip pending">${items.length} 个</span>
+            </div>
+            <div class="reservation-list">
+                ${items.length ? items.map(renderReservationCard).join('') : renderEmptyState('暂无预约任务', '创建后会在这里显示每次保单窗口和最近一次执行结果。')}
+            </div>
+        </section>
+    `;
 }
 
 function renderOrders() {
     if (!isTokenReady()) {
-        el.ordersList.innerHTML = renderStatusCard('danger', '订单页面暂不可用', getTokenAlertMessage());
+        el.ordersList.innerHTML = renderStatusCard('warning', '需要可用 Token', getTokenAlertMessage(), `
+            <div class="spacer-sm"></div>
+            <button class="btn btn-primary full-width" type="button" data-action="goto-settings">去设置</button>
+        `);
         el.loadMoreOrdersBtn.classList.add('hidden');
         return;
     }
 
-    if (!state.orders.items.length && state.orders.loading) {
-        el.ordersList.innerHTML = '<div class="panel-card loading-card">正在加载订单...</div>';
-        el.loadMoreOrdersBtn.classList.add('hidden');
-        return;
-    }
+    const activeProcesses = state.orders.activeProcesses || [];
+    const items = state.orders.items || [];
+    const activeOrderNos = new Set(activeProcesses.map(item => item.orderNo).filter(Boolean));
 
-    if (!state.orders.items.length) {
-        el.ordersList.innerHTML = renderEmptyState('暂无订单记录', '下拉刷新或稍后再试。');
-        el.loadMoreOrdersBtn.classList.add('hidden');
-        return;
-    }
-
-    const cards = state.orders.items.map(order => {
-        const detail = cache.orderDetails.get(order.orderNo);
-        const expanded = Boolean(state.orders.expanded[order.orderNo]);
-        const detailSection = expanded ? renderOrderDetailSection(order, detail) : '';
-        return `
-            <article class="order-card">
-                <div class="card-title">
-                    <div>
-                        <h3>${escapeHtml(order.machineName)}</h3>
-                        <p>${escapeHtml(order.modeName)} · ${escapeHtml(order.orderNo)}</p>
-                    </div>
-                    <span class="chip ${orderChipClass(order.state)}">${escapeHtml(order.stateDesc || '未知状态')}</span>
+    el.ordersList.innerHTML = `
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>待继续流程</h3>
+                    <p>已经创建订单但还没走完的虚拟扫码流程，会一直保留在这里。</p>
                 </div>
-                <div class="detail-grid">
-                    <div><span>金额</span><span>${escapeHtml(order.price || '--')} 元</span></div>
-                    <div><span>创建时间</span><span>${escapeHtml(formatDateTime(order.createTime))}</span></div>
-                    <div><span>完成时间</span><span>${escapeHtml(formatDateTime(order.completeTime))}</span></div>
-                    <div><span>订单状态</span><span>${escapeHtml(order.stateDesc || '--')}</span></div>
+                <span class="chip warning">${activeProcesses.length} 条</span>
+            </div>
+            <div class="order-list">
+                ${activeProcesses.length ? activeProcesses.map(renderActiveProcessCard).join('') : renderEmptyState('暂无待继续流程', '当手动扫码流程创建出订单后，就会出现在这里。')}
+            </div>
+        </section>
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>历史订单</h3>
+                    <p>下拉可自动加载更多，展开后可以结束或取消允许操作的订单。</p>
                 </div>
-                <div class="spacer-sm"></div>
-                <div class="action-row">
-                    <button class="btn btn-light" data-action="toggle-order-detail" data-order-no="${escapeHtml(order.orderNo)}">${expanded ? '收起详情' : '查看详情'}</button>
-                </div>
-                ${detailSection}
-            </article>
-        `;
-    }).join('');
-
-    el.ordersList.innerHTML = cards;
-    el.loadMoreOrdersBtn.classList.toggle('hidden', !state.orders.hasMore);
-    el.loadMoreOrdersBtn.disabled = !state.orders.hasMore || state.orders.loading;
-}
-
-function renderOrderDetailSection(order, detail) {
-    if (!detail) {
-        return '<div class="spacer-sm"></div><div class="callout">正在加载订单详情...</div>';
-    }
-    return `
-        <div class="spacer-sm"></div>
-        <div class="callout">
-            状态页：${escapeHtml(detail.pageCode || '--')}<br>
-            支付时间：${escapeHtml(formatDateTime(detail.payTime))}<br>
-            失效时间：${escapeHtml(formatDateTime(detail.invalidTime))}<br>
-            洗衣房：${escapeHtml(detail.shopName || '--')}
-        </div>
-        <div class="spacer-sm"></div>
-        <div class="action-row">
-            ${detail.buttonSwitch && detail.buttonSwitch.canCloseOrder ? `<button class="btn btn-danger" data-action="finish-order" data-order-no="${escapeHtml(order.orderNo)}">结束订单</button>` : ''}
-            ${detail.buttonSwitch && detail.buttonSwitch.canCancel ? `<button class="btn btn-light" data-action="cancel-order" data-order-no="${escapeHtml(order.orderNo)}">取消订单</button>` : ''}
-        </div>
+                <span class="chip pending">${state.orders.total || items.length} 条</span>
+            </div>
+            <div class="order-list">
+                ${items.length ? items.map(order => renderHistoryOrderCard(order, activeOrderNos.has(order.orderNo))).join('') : renderEmptyState('暂无订单', '当前没有可显示的历史订单。')}
+            </div>
+        </section>
     `;
+
+    el.loadMoreOrdersBtn.classList.toggle('hidden', !state.orders.hasMore || state.orders.loading);
+    el.loadMoreOrdersBtn.disabled = state.orders.loading || !state.orders.hasMore;
 }
 
 function renderSettings() {
-    const settings = state.settings;
-    const sourceSummary = settings && settings.sources
-        ? `
-            <div class="detail-grid">
-                <div><span>Token 来源</span><span>${escapeHtml(sourceText(settings.sources.token))}</span></div>
-                <div><span>PushPlus 来源</span><span>${escapeHtml(sourceText(settings.sources.pushplusUrl))}</span></div>
-                <div><span>默认提前分钟</span><span>${escapeHtml(sourceText(settings.sources.defaultLeadMinutes))}</span></div>
-                <div><span>HTTPS 校验</span><span>${state.security && state.security.sslVerify ? '开启' : '关闭'}</span></div>
-            </div>
-        `
-        : '<div class="callout">正在读取设置...</div>';
-
-    const schedulerInfo = renderSchedulerCard();
-    el.settingsInfo.innerHTML = [
-        renderStatusCard(tokenClassName(state.tokenStatus.reason), tokenLabel(), state.tokenStatus.message),
-        `
-            <section class="sheet-card">
-                <h3 class="section-title">当前设置来源</h3>
-                ${sourceSummary}
-            </section>
-        `,
-        schedulerInfo,
-        `
-            <section class="sheet-card">
-                <h3 class="section-title">运行说明</h3>
-                <div class="callout">
-                    预约调度会在目标时间前一段时间自动建单，并在订单失效时尝试补建。当前版本只对支持虚拟扫码的机器开放预约。
-                </div>
-            </section>
-        `,
-    ].join('');
-}
-
-function renderSchedulerCard() {
+    const settings = state.settings || {};
     const scheduler = state.scheduler || {};
-    const lastResult = scheduler.lastResult || {};
-    return `
-        <section class="sheet-card">
+    const sources = settings.sources || {};
+    el.settingsInfo.innerHTML = `
+        ${renderStatusCard(tokenClassName(state.tokenStatus.reason), 'Token 状态', getTokenAlertMessage(), `
+            <div class="spacer-sm"></div>
+            <div class="detail-grid">
+                <div><span>Token 来源</span><span>${escapeHtml(sourceText(state.tokenStatus.source))}</span></div>
+                <div><span>当前状态</span><span>${escapeHtml(tokenLabel())}</span></div>
+            </div>
+        `)}
+        <section class="panel-card">
             <div class="card-title">
                 <div>
-                    <h3>调度器状态</h3>
-                    <p>后台轮询预约任务并维持待支付订单。</p>
+                    <h3>设置来源</h3>
+                    <p>数据库中的设置优先级高于 `.env` 默认值。</p>
                 </div>
-                <span class="chip ${scheduler.running ? 'success' : 'danger'}">${scheduler.running ? '运行中' : '未运行'}</span>
             </div>
             <div class="detail-grid">
-                <div><span>轮询间隔</span><span>${escapeHtml(String(scheduler.intervalSeconds || '--'))} 秒</span></div>
+                <div><span>Token</span><span>${escapeHtml(sourceText(sources.token))}</span></div>
+                <div><span>PushPlus</span><span>${escapeHtml(sourceText(sources.pushplusUrl))}</span></div>
+                <div><span>默认提前分钟</span><span>${escapeHtml(sourceText(sources.defaultLeadMinutes))}</span></div>
+                <div><span>轮询间隔</span><span>${escapeHtml(sourceText(sources.reservationPollIntervalSeconds))}</span></div>
+            </div>
+        </section>
+        <section class="panel-card">
+            <div class="card-title">
+                <div>
+                    <h3>调度器快照</h3>
+                    <p>保存轮询间隔后会立即热更新，不需要重启服务。</p>
+                </div>
+                <span class="chip ${scheduler.running ? 'success' : 'danger'}">${scheduler.running ? '运行中' : '已停止'}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>当前间隔</span><span>${escapeHtml(stringOrFallback(scheduler.intervalSeconds, '--'))} 秒</span></div>
                 <div><span>最近轮询</span><span>${escapeHtml(formatDateTime(scheduler.lastTickAt))}</span></div>
-                <div><span>最近创建</span><span>${escapeHtml(stringOrFallback(lastResult.created, '--'))}</span></div>
-                <div><span>最近补建</span><span>${escapeHtml(stringOrFallback(lastResult.recreated, '--'))}</span></div>
+                <div><span>最近创建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).created, 0))}</span></div>
+                <div><span>最近补建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).recreated, 0))}</span></div>
             </div>
             ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
         </section>
+    `;
+}
+
+function renderRoomCard(room) {
+    return `
+        <article class="list-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(room.name || '洗衣房')}</h4>
+                    <p>${escapeHtml(room.address || '暂无地址')}</p>
+                </div>
+                <span class="chip ${room.enableReserve ? 'success' : 'pending'}">${room.enableReserve ? '可预约' : '普通房间'}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>空闲数</span><span>${escapeHtml(stringOrFallback(room.idleCount, '--'))}</span></div>
+                <div><span>预约数</span><span>${escapeHtml(stringOrFallback(room.reserveNum, '--'))}</span></div>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-primary" type="button" data-action="open-room" data-room-id="${escapeHtml(room.id)}">查看设备</button>
+            </div>
+        </article>
+    `;
+}
+
+function renderScanMachineCard(machine) {
+    return `
+        <article class="list-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(machine.label || '扫码机组')}</h4>
+                    <p>二维码编号：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
+                </div>
+                <span class="chip warning">手动流程</span>
+            </div>
+            <div class="action-row">
+                <button class="btn btn-primary" type="button" data-action="open-scan" data-qr-code="${escapeHtml(machine.qrCode)}">进入流程</button>
+            </div>
+        </article>
+    `;
+}
+
+function renderRoomMachineCard(machine) {
+    return `
+        <article class="machine-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(machine.name || '设备')}</h4>
+                    <p>${escapeHtml(machine.floorCode || '未标记楼层')}</p>
+                </div>
+                <span class="chip ${machineChipClass(machine)}">${escapeHtml(machine.statusLabel || machine.stateDesc || '未知')}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>状态</span><span>${escapeHtml(machine.statusDetail || machine.stateDesc || '--')}</span></div>
+                <div><span>完成时间</span><span>${escapeHtml(machine.finishTimeText || '--')}</span></div>
+                <div><span>预约能力</span><span>${machine.enableReserve ? '支持' : '不支持'}</span></div>
+                <div><span>虚拟扫码</span><span>${machine.supportsVirtualScan ? '支持' : '不支持'}</span></div>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-secondary" type="button" data-action="open-machine" data-goods-id="${escapeHtml(machine.goodsId)}">查看详情</button>
+                ${machine.supportsVirtualScan && machine.scanCode ? `<button class="btn btn-light" type="button" data-action="open-scan" data-qr-code="${escapeHtml(machine.scanCode)}">虚拟扫码</button>` : ''}
+            </div>
+        </article>
+    `;
+}
+
+function renderReservationCard(task) {
+    const lastEvent = task.lastEvent || {};
+    const statusClass = reservationStatusClass(task.status);
+    return `
+        <article class="order-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(task.title || task.machineName || '预约任务')}</h4>
+                    <p>${escapeHtml(task.machineName || '--')} · ${escapeHtml(task.modeName || '--')}</p>
+                </div>
+                <span class="chip ${statusClass}">${escapeHtml(reservationStatusLabel(task.status))}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>目标时间</span><span>${escapeHtml(formatDateTime(task.targetTime))}</span></div>
+                <div><span>保单窗口</span><span>${escapeHtml(formatWindow(task.startAt, task.holdUntil))}</span></div>
+                <div><span>活跃订单</span><span>${escapeHtml(task.activeOrderNo || '--')}</span></div>
+                <div><span>最近检查</span><span>${escapeHtml(formatDateTime(task.lastCheckedAt))}</span></div>
+            </div>
+            ${task.lastError ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(task.lastError)}</div>` : ''}
+            ${lastEvent.message ? `<div class="spacer-sm"></div><div class="callout">${escapeHtml(lastEvent.message)}</div>` : ''}
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                ${task.status === 'paused' ? `<button class="btn btn-secondary" type="button" data-action="resume-reservation" data-task-id="${escapeHtml(String(task.id))}">恢复</button>` : `<button class="btn btn-light" type="button" data-action="pause-reservation" data-task-id="${escapeHtml(String(task.id))}">暂停</button>`}
+                <button class="btn btn-danger" type="button" data-action="delete-reservation" data-task-id="${escapeHtml(String(task.id))}">删除</button>
+            </div>
+        </article>
+    `;
+}
+
+function renderActiveProcessCard(process) {
+    const order = process.order || {};
+    return `
+        <article class="order-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(order.machineName || '待继续流程')}</h4>
+                    <p>订单号：${escapeHtml(process.orderNo || '--')}</p>
+                </div>
+                <span class="chip warning">${escapeHtml(process.currentStepLabel || '待继续')}</span>
+            </div>
+            <div class="detail-grid">
+                <div><span>当前步骤</span><span>${escapeHtml(process.currentStepLabel || '--')}</span></div>
+                <div><span>订单状态</span><span>${escapeHtml(order.stateDesc || '--')}</span></div>
+                <div><span>页面状态</span><span>${escapeHtml(order.pageCode || '--')}</span></div>
+                <div><span>最近更新</span><span>${escapeHtml(formatDateTime(process.updatedAt))}</span></div>
+            </div>
+            ${process.blockedReason ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(process.blockedReason)}</div>` : ''}
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-primary" type="button" data-action="continue-process" data-process-id="${escapeHtml(process.processId)}">继续流程</button>
+                <button class="btn btn-danger" type="button" data-action="abandon-process" data-process-id="${escapeHtml(process.processId)}">放弃流程</button>
+            </div>
+        </article>
+    `;
+}
+
+function renderHistoryOrderCard(order, hasProcess) {
+    const expanded = Boolean(state.orders.expanded[order.orderNo]);
+    const detail = cache.orderDetails.get(order.orderNo);
+    const buttonSwitch = detail ? (detail.buttonSwitch || {}) : {};
+    return `
+        <article class="order-card">
+            <div class="card-title">
+                <div>
+                    <h4>${escapeHtml(order.machineName || '订单')}</h4>
+                    <p>${escapeHtml(order.modeName || '--')} · ${escapeHtml(order.orderNo || '--')}</p>
+                </div>
+                <div class="inline-row">
+                    ${hasProcess ? '<span class="chip warning">流程进行中</span>' : ''}
+                    <span class="chip ${orderChipClass(order.state)}">${escapeHtml(order.stateDesc || '未知状态')}</span>
+                </div>
+            </div>
+            <div class="detail-grid">
+                <div><span>价格</span><span>${escapeHtml(stringOrFallback(order.price, '--'))}</span></div>
+                <div><span>创建时间</span><span>${escapeHtml(formatDateTime(order.createTime))}</span></div>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="action-row">
+                <button class="btn btn-light" type="button" data-action="toggle-order-detail" data-order-no="${escapeHtml(order.orderNo)}">${expanded ? '收起详情' : '展开详情'}</button>
+                ${buttonSwitch.canCloseOrder ? `<button class="btn btn-danger" type="button" data-action="finish-order" data-order-no="${escapeHtml(order.orderNo)}">结束订单</button>` : ''}
+                ${buttonSwitch.canCancel ? `<button class="btn btn-light" type="button" data-action="cancel-order" data-order-no="${escapeHtml(order.orderNo)}">取消订单</button>` : ''}
+            </div>
+            ${expanded ? renderOrderDetail(detail) : ''}
+        </article>
+    `;
+}
+
+function renderOrderDetail(detail) {
+    if (!detail) {
+        return `
+            <div class="spacer-sm"></div>
+            <div class="callout">正在加载订单详情...</div>
+        `;
+    }
+    return `
+        <div class="spacer-sm"></div>
+        <div class="detail-grid">
+            <div><span>状态</span><span>${escapeHtml(detail.stateDesc || '--')}</span></div>
+            <div><span>页面状态</span><span>${escapeHtml(detail.pageCode || '--')}</span></div>
+            <div><span>支付时间</span><span>${escapeHtml(formatDateTime(detail.payTime))}</span></div>
+            <div><span>失效时间</span><span>${escapeHtml(formatDateTime(detail.invalidTime))}</span></div>
+            <div><span>洗衣房</span><span>${escapeHtml(detail.shopName || '--')}</span></div>
+            <div><span>模式</span><span>${escapeHtml(detail.modeName || '--')}</span></div>
+        </div>
     `;
 }
 
@@ -1036,14 +1323,20 @@ function renderStatusCard(variant, title, body, extra = '') {
 
 function renderEmptyState(title, description) {
     return `
-        <div class="panel-card empty-state">
+        <div class="empty-state">
             <strong>${escapeHtml(title)}</strong>
             <p>${escapeHtml(description)}</p>
         </div>
     `;
 }
 
-function handleWashClick(event) {
+function renderSelect(id, items, placeholder) {
+    const options = [`<option value="">${escapeHtml(placeholder)}</option>`]
+        .concat((items || []).map(item => `<option value="${escapeHtml(String(item.value))}">${escapeHtml(item.label)}</option>`));
+    return `<select id="${escapeHtml(id)}">${options.join('')}</select>`;
+}
+
+async function handleWashClick(event) {
     const button = event.target.closest('[data-action]');
     if (!button) {
         return;
@@ -1054,59 +1347,79 @@ function handleWashClick(event) {
         switchTab('settingsTab');
         return;
     }
+    if (action === 'goto-orders') {
+        switchTab('orderTab');
+        await refreshOrdersOverview(true);
+        return;
+    }
+    if (action === 'back-home') {
+        clearWashTransientState();
+        state.wash.view = 'home';
+        renderWash();
+        pushHistoryState();
+        return;
+    }
+    if (action === 'back-room') {
+        if (state.wash.roomId && state.wash.roomData) {
+            state.wash.view = 'room';
+            state.wash.machineId = null;
+            state.wash.machineDetail = null;
+            state.wash.scanMachine = null;
+            state.wash.process = null;
+            state.wash.result = null;
+        } else {
+            clearWashTransientState();
+            state.wash.view = 'home';
+        }
+        renderWash();
+        pushHistoryState();
+        return;
+    }
 
     if (!ensureTokenReady()) {
         return;
     }
 
-    if (action === 'back-home') {
-        state.wash.view = 'home';
-        state.wash.roomId = null;
-        state.wash.roomData = null;
-        state.wash.machineId = null;
-        state.wash.machineDetail = null;
-        state.wash.scanMachine = null;
-        state.wash.result = null;
-        renderWash();
-        return;
-    }
-
-    if (action === 'back-room') {
-        state.wash.view = 'room';
-        state.wash.machineId = null;
-        state.wash.machineDetail = null;
-        state.wash.result = null;
-        renderWash();
-        return;
-    }
-
-    if (action === 'open-room') {
-        openRoom(button.dataset.roomId).catch(err => handleRequestError(err, '加载洗衣房失败。'));
-        return;
-    }
-
-    if (action === 'open-machine') {
-        openMachine(button.dataset.goodsId).catch(err => handleRequestError(err, '加载机器详情失败。'));
-        return;
-    }
-
-    if (action === 'open-scan') {
-        openScanMachine(button.dataset.qrCode).catch(err => handleRequestError(err, '加载扫码机模式失败。'));
-        return;
-    }
-
-    if (action === 'create-lock-order') {
-        createLockOrder().catch(err => handleRequestError(err, '线上下单失败。'));
-        return;
-    }
-
-    if (action === 'create-scan-order') {
-        createScanOrder().catch(err => handleRequestError(err, '扫码下单失败。'));
+    try {
+        if (action === 'open-room') {
+            await openRoom(button.dataset.roomId);
+            return;
+        }
+        if (action === 'open-machine') {
+            await openMachine(button.dataset.goodsId);
+            return;
+        }
+        if (action === 'open-scan') {
+            await openScanMachine(button.dataset.qrCode);
+            return;
+        }
+        if (action === 'open-machine-scan') {
+            await openMachineScan();
+            return;
+        }
+        if (action === 'create-lock-order') {
+            await createLockOrder();
+            return;
+        }
+        if (action === 'start-scan-process') {
+            await startScanProcess();
+            return;
+        }
+        if (action === 'next-process') {
+            await advanceProcess();
+            return;
+        }
+        if (action === 'reset-process') {
+            await resetProcess();
+        }
+    } catch (error) {
+        handleRequestError(error, '操作失败，请稍后重试。');
     }
 }
 
-async function openRoom(roomId) {
-    setWashLoading('正在加载洗衣房设备...');
+async function openRoom(roomId, options = {}) {
+    state.wash.loading = true;
+    renderWashLoading('正在加载洗衣房设备...');
     try {
         const payload = await getRoomMachines(roomId);
         state.wash.view = 'room';
@@ -1115,48 +1428,102 @@ async function openRoom(roomId) {
         state.wash.machineId = null;
         state.wash.machineDetail = null;
         state.wash.scanMachine = null;
+        state.wash.process = null;
         state.wash.result = null;
-    } finally {
         state.wash.loading = false;
         renderWash();
+        if (options.pushHistory !== false) {
+            pushHistoryState();
+        }
+    } catch (error) {
+        state.wash.loading = false;
+        renderWash();
+        throw error;
     }
 }
 
-async function openMachine(goodsId) {
-    setWashLoading('正在加载机器详情...');
+async function openMachine(goodsId, options = {}) {
+    state.wash.loading = true;
+    renderWashLoading('正在加载设备详情...');
     try {
-        const detail = await getMachineDetail(goodsId);
+        if (options.roomId && (!state.wash.roomData || state.wash.roomId !== options.roomId)) {
+            state.wash.roomData = await getRoomMachines(options.roomId);
+            state.wash.roomId = options.roomId;
+        }
+        state.wash.machineDetail = await getMachineDetail(goodsId);
         state.wash.view = 'machine';
         state.wash.machineId = goodsId;
-        state.wash.machineDetail = detail;
         state.wash.scanMachine = null;
+        state.wash.process = null;
         state.wash.result = null;
-    } finally {
         state.wash.loading = false;
         renderWash();
+        if (options.pushHistory !== false) {
+            pushHistoryState();
+        }
+    } catch (error) {
+        state.wash.loading = false;
+        renderWash();
+        throw error;
     }
 }
 
-async function openScanMachine(qrCode) {
-    const machine = (state.wash.scanMachines || []).find(item => item.qrCode === qrCode);
-    if (!machine) {
-        throw new Error('未找到对应扫码机组。');
-    }
-    setWashLoading('正在读取扫码机可用模式...');
+async function openScanMachine(qrCode, options = {}) {
+    const localMachine = (state.wash.scanMachines || []).find(item => item.qrCode === qrCode);
+    state.wash.loading = true;
+    renderWashLoading('正在读取可用模式...');
     try {
-        const modes = await getScanModes(qrCode);
+        state.wash.scanMachine = {
+            ...(localMachine || { label: options.label || '虚拟扫码设备', qrCode }),
+            modes: await getScanModes(qrCode),
+        };
         state.wash.view = 'scan';
-        state.wash.scanMachine = { ...machine, modes };
+        state.wash.machineDetail = null;
+        state.wash.process = null;
         state.wash.result = null;
-    } finally {
         state.wash.loading = false;
         renderWash();
+        if (options.pushHistory !== false) {
+            pushHistoryState();
+        }
+    } catch (error) {
+        state.wash.loading = false;
+        renderWash();
+        throw error;
+    }
+}
+
+async function openMachineScan() {
+    const machine = state.wash.machineDetail;
+    if (!machine || !machine.supportsVirtualScan || !machine.scanCode) {
+        window.alert('当前设备不支持虚拟扫码流程。');
+        return;
+    }
+    await openScanMachine(machine.scanCode, { label: machine.name });
+}
+
+async function openProcess(processId, options = {}) {
+    state.wash.loading = true;
+    renderWashLoading('正在恢复流程...');
+    try {
+        state.wash.process = await getProcessDetail(processId);
+        state.wash.view = 'process';
+        state.wash.result = null;
+        state.wash.loading = false;
+        renderWash();
+        if (options.pushHistory !== false) {
+            pushHistoryState();
+        }
+    } catch (error) {
+        state.wash.loading = false;
+        renderWash();
+        throw error;
     }
 }
 
 async function createLockOrder() {
     const machine = state.wash.machineDetail;
-    const modeId = getSelectedModeValue('washModeSelect');
+    const modeId = getSelectedValue('washModeSelect');
     if (!machine || !modeId) {
         window.alert('请先选择模式。');
         return;
@@ -1176,39 +1543,66 @@ async function createLockOrder() {
         todo: todo.todo || null,
     };
     renderWash();
-    showToastMessage('线上订单已创建，后续步骤保持 TODO。');
+    showToastMessage('线上下单已到创建订单，后续链路仍是 TODO。');
 }
 
-async function createScanOrder() {
-    const scanMachine = state.wash.view === 'scan' ? state.wash.scanMachine : null;
-    const machine = state.wash.view === 'machine' ? state.wash.machineDetail : null;
-    const qrCode = scanMachine ? scanMachine.qrCode : machine ? machine.scanCode : '';
-    const selectId = scanMachine ? 'scanModeSelect' : 'washModeSelect';
-    const modeId = getSelectedModeValue(selectId);
+async function startScanProcess() {
+    const scanMachine = state.wash.scanMachine;
+    const qrCode = scanMachine ? scanMachine.qrCode : '';
+    const modeId = getSelectedValue('scanModeSelect');
     if (!qrCode || !modeId) {
         window.alert('请先选择模式。');
         return;
     }
 
-    const data = await apiPost('/api/orders/create-by-scan', {
-        qrCode,
-        modeId,
-    });
+    const data = await apiPost('/api/process/start', { qrCode, modeId });
+    showToastMessage(data.msg || '流程已创建。');
+    state.wash.result = null;
+    await openProcess((data.process || {}).processId);
+}
 
-    state.wash.result = {
-        variant: 'success',
-        title: '扫码下单已完成',
-        message: data.msg || '订单创建和支付流程已完成。',
-        order: data.order || null,
-        todo: null,
-    };
+async function advanceProcess() {
+    const process = state.wash.process;
+    if (!process || !process.processId) {
+        window.alert('当前没有可继续的流程。');
+        return;
+    }
+
+    const data = await apiPost('/api/process/next', { processId: process.processId });
+    await openProcess(process.processId, { pushHistory: false });
+    await loadActiveProcesses();
+    if ((data.process || {}).completed) {
+        await loadOrders(true);
+    }
+    showToastMessage(data.msg || '流程已推进。');
+}
+
+async function resetProcess() {
+    const process = state.wash.process;
+    if (!process || !process.processId) {
+        clearWashTransientState();
+        state.wash.view = 'home';
+        renderWash();
+        pushHistoryState();
+        return;
+    }
+    if (!window.confirm('确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。')) {
+        return;
+    }
+    const data = await apiPost('/api/process/reset', {
+        processId: process.processId,
+        cleanupRemote: true,
+    });
+    showToastMessage(data.msg || '流程已重置。');
+    clearWashTransientState();
+    state.wash.view = 'home';
     renderWash();
-    showToastMessage('扫码下单流程已完成。');
+    pushHistoryState();
+    await refreshOrdersOverview(true);
 }
 
 async function handleReservationSubmit(event) {
     event.preventDefault();
-
     if (!ensureTokenReady()) {
         return;
     }
@@ -1256,10 +1650,6 @@ async function handleReservationSubmit(event) {
             window.alert('请先选择洗衣房和洗衣机。');
             return;
         }
-        if (!machine.supportsVirtualScan || !machine.scanCode) {
-            window.alert('当前预约仅支持可虚拟扫码的机器。');
-            return;
-        }
         payload.machineId = machine.goodsId;
         payload.machineName = machine.name;
         payload.roomId = room.id;
@@ -1298,14 +1688,12 @@ async function handleReservationClick(event) {
         return;
     }
 
-    if (button.dataset.action === 'delete-reservation') {
-        if (!window.confirm('确定删除这个预约任务吗？')) {
-            return;
-        }
-        const data = await apiDelete(`/api/reservations/${taskId}`);
-        showToastMessage(data.msg || '预约任务已删除。');
-        await loadReservations();
+    if (!window.confirm('确定删除这个预约任务吗？')) {
+        return;
     }
+    const data = await apiDelete(`/api/reservations/${taskId}`);
+    showToastMessage(data.msg || '预约任务已删除。');
+    await loadReservations();
 }
 
 async function handleOrderClick(event) {
@@ -1314,7 +1702,30 @@ async function handleOrderClick(event) {
         return;
     }
 
+    const action = button.dataset.action;
+    if (action === 'goto-settings') {
+        switchTab('settingsTab');
+        return;
+    }
     if (!ensureTokenReady()) {
+        return;
+    }
+
+    if (action === 'continue-process') {
+        switchTab('washTab', { pushHistory: false });
+        await openProcess(button.dataset.processId);
+        return;
+    }
+    if (action === 'abandon-process') {
+        if (!window.confirm('确定放弃这个待继续流程吗？')) {
+            return;
+        }
+        const data = await apiPost('/api/process/reset', {
+            processId: button.dataset.processId,
+            cleanupRemote: true,
+        });
+        showToastMessage(data.msg || '流程已放弃。');
+        await refreshOrdersOverview(true);
         return;
     }
 
@@ -1323,48 +1734,46 @@ async function handleOrderClick(event) {
         return;
     }
 
-    if (button.dataset.action === 'toggle-order-detail') {
+    if (action === 'toggle-order-detail') {
         const expanded = Boolean(state.orders.expanded[orderNo]);
         state.orders.expanded[orderNo] = !expanded;
         renderOrders();
         if (!expanded) {
             try {
-                const detail = await getOrderDetail(orderNo);
-                updateOrderFromDetail(orderNo, detail);
+                updateOrderFromDetail(orderNo, await getOrderDetail(orderNo));
                 renderOrders();
-            } catch (err) {
-                handleRequestError(err, '读取订单详情失败。', true);
+            } catch (error) {
+                handleRequestError(error, '读取订单详情失败。', true);
             }
         }
         return;
     }
 
-    if (button.dataset.action === 'finish-order') {
+    if (action === 'finish-order') {
         if (!window.confirm(`确定结束订单 ${orderNo} 吗？`)) {
             return;
         }
         const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/finish`, {});
         showToastMessage(data.msg || '订单已结束。');
         await refreshSingleOrder(orderNo);
+        await loadActiveProcesses();
         return;
     }
 
-    if (button.dataset.action === 'cancel-order') {
-        if (!window.confirm(`确定取消订单 ${orderNo} 吗？`)) {
-            return;
-        }
-        const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});
-        showToastMessage(data.msg || '订单已取消。');
-        await refreshSingleOrder(orderNo);
+    if (!window.confirm(`确定取消订单 ${orderNo} 吗？`)) {
+        return;
     }
+    const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});
+    showToastMessage(data.msg || '订单已取消。');
+    await refreshSingleOrder(orderNo);
+    await loadActiveProcesses();
 }
 
 async function refreshSingleOrder(orderNo) {
     try {
-        const detail = await getOrderDetail(orderNo, true);
-        updateOrderFromDetail(orderNo, detail);
-    } catch (err) {
-        handleRequestError(err, '刷新订单详情失败。', true);
+        updateOrderFromDetail(orderNo, await getOrderDetail(orderNo, true));
+    } catch (error) {
+        handleRequestError(error, '刷新订单详情失败。', true);
     }
     await loadOrders(true);
 }
@@ -1387,6 +1796,7 @@ async function handleSettingsSubmit(event) {
         token: el.settingsToken.value.trim(),
         pushplusUrl: el.settingsPushplusUrl.value.trim(),
         defaultLeadMinutes: Number(el.settingsLeadMinutes.value || 60),
+        reservationPollIntervalSeconds: Number(el.settingsPollInterval.value || 30),
     };
 
     try {
@@ -1398,17 +1808,15 @@ async function handleSettingsSubmit(event) {
         showToastMessage(data.msg || '设置已保存。');
 
         if (isTokenReady()) {
-            await loadLaundrySections();
+            await loadLaundrySections({ showToast: false, preserveView: false });
             await hydrateReservationForm();
-            if (state.activeTab === 'orderTab') {
-                await loadOrders(true);
-            }
+            await refreshOrdersOverview(true);
         } else {
             renderWash();
             renderOrders();
         }
-    } catch (err) {
-        handleRequestError(err, '保存设置失败。', true);
+    } catch (error) {
+        handleRequestError(error, '保存设置失败。', true);
     }
 }
 
@@ -1421,15 +1829,29 @@ function showToastMessage(message) {
     }, 2600);
 }
 
-function fillSelect(select, items, placeholder) {
+function fillSelect(select, items, placeholder, selectedValue = '') {
     const options = [`<option value="">${escapeHtml(placeholder)}</option>`]
         .concat((items || []).map(item => `<option value="${escapeHtml(String(item.value))}">${escapeHtml(item.label)}</option>`));
     select.innerHTML = options.join('');
+    if (selectedValue) {
+        select.value = selectedValue;
+    }
 }
 
-function getSelectedModeValue(selectId) {
-    const select = document.getElementById(selectId);
+function getSelectedValue(id) {
+    const select = document.getElementById(id);
     return select ? select.value : '';
+}
+
+function machineChipClass(machine) {
+    const label = String(machine.statusLabel || machine.stateDesc || '');
+    if (label.includes('运行')) {
+        return 'warning';
+    }
+    if (label.includes('空闲')) {
+        return 'success';
+    }
+    return 'danger';
 }
 
 function reservationStatusClass(status) {
@@ -1540,7 +1962,7 @@ function maskCode(value) {
     if (!value) {
         return '--';
     }
-    if (value.length <= 6) {
+    if (value.length <= 8) {
         return value;
     }
     return `${value.slice(0, 4)}...${value.slice(-4)}`;
@@ -1590,10 +2012,7 @@ function handleRequestError(error, fallbackMessage, silent = false) {
 }
 
 function extractErrorPayload(error) {
-    if (error && error.payload) {
-        return error.payload;
-    }
-    return null;
+    return error && error.payload ? error.payload : null;
 }
 
 async function apiGet(url) {
@@ -1632,8 +2051,8 @@ async function request(url, options) {
     let data = null;
     try {
         data = await response.json();
-    } catch (err) {
-        const parseError = new Error(`响应解析失败: ${err.message}`);
+    } catch (error) {
+        const parseError = new Error(`响应解析失败：${error.message}`);
         parseError.payload = null;
         throw parseError;
     }

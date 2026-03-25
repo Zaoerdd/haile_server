@@ -4,13 +4,25 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict
 
-from config import DEFAULT_LEAD_MINUTES, get_haile_token, get_pushplus_url
+from config import DEFAULT_LEAD_MINUTES, SCHEDULER_INTERVAL_SECONDS, get_haile_token, get_pushplus_url
 from services.db import database
 from services.haier_client import HaierClient
 
 
+MIN_POLL_INTERVAL_SECONDS = 5
+MAX_POLL_INTERVAL_SECONDS = 3600
+
+
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat()
+
+
+def clamp_int(value: Any, fallback: int, minimum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(number, minimum)
 
 
 @dataclass
@@ -18,6 +30,7 @@ class EffectiveSettings:
     token: str
     pushplus_url: str
     default_lead_minutes: int
+    reservation_poll_interval_seconds: int
     sources: Dict[str, str]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -25,12 +38,18 @@ class EffectiveSettings:
             'token': self.token,
             'pushplusUrl': self.pushplus_url,
             'defaultLeadMinutes': self.default_lead_minutes,
+            'reservationPollIntervalSeconds': self.reservation_poll_interval_seconds,
             'sources': self.sources,
         }
 
 
 class SettingsStore:
-    editable_keys = {'token', 'pushplus_url', 'default_lead_minutes'}
+    editable_keys = {
+        'token',
+        'pushplus_url',
+        'default_lead_minutes',
+        'reservation_poll_interval_seconds',
+    }
 
     def __init__(self) -> None:
         database.init()
@@ -40,6 +59,7 @@ class SettingsStore:
             'token': get_haile_token(),
             'pushplus_url': get_pushplus_url(),
             'default_lead_minutes': DEFAULT_LEAD_MINUTES,
+            'reservation_poll_interval_seconds': SCHEDULER_INTERVAL_SECONDS,
         }
 
     def _db_values(self) -> Dict[str, str]:
@@ -52,21 +72,28 @@ class SettingsStore:
 
         token = db_values.get('token', defaults['token']).strip()
         pushplus_url = db_values.get('pushplus_url', defaults['pushplus_url']).strip()
-        lead_raw = db_values.get('default_lead_minutes')
-        try:
-            default_lead_minutes = int(lead_raw) if lead_raw not in (None, '') else int(defaults['default_lead_minutes'])
-        except ValueError:
-            default_lead_minutes = int(defaults['default_lead_minutes'])
+        default_lead_minutes = clamp_int(
+            db_values.get('default_lead_minutes'),
+            int(defaults['default_lead_minutes']),
+            1,
+        )
+        reservation_poll_interval_seconds = clamp_int(
+            db_values.get('reservation_poll_interval_seconds'),
+            int(defaults['reservation_poll_interval_seconds']),
+            MIN_POLL_INTERVAL_SECONDS,
+        )
 
         sources = {
             'token': 'database' if 'token' in db_values else 'env',
             'pushplusUrl': 'database' if 'pushplus_url' in db_values else 'env',
             'defaultLeadMinutes': 'database' if 'default_lead_minutes' in db_values else 'env',
+            'reservationPollIntervalSeconds': 'database' if 'reservation_poll_interval_seconds' in db_values else 'env',
         }
         return EffectiveSettings(
             token=token,
             pushplus_url=pushplus_url,
-            default_lead_minutes=max(default_lead_minutes, 1),
+            default_lead_minutes=default_lead_minutes,
+            reservation_poll_interval_seconds=min(reservation_poll_interval_seconds, MAX_POLL_INTERVAL_SECONDS),
             sources=sources,
         )
 
@@ -82,10 +109,18 @@ class SettingsStore:
             try:
                 lead_minutes = int(payload.get('defaultLeadMinutes'))
             except (TypeError, ValueError):
-                raise ValueError('默认提前建单分钟数必须为正整数')
+                raise ValueError('默认提前建单分钟数必须是正整数')
             if lead_minutes <= 0:
                 raise ValueError('默认提前建单分钟数必须大于 0')
             updates.append(('default_lead_minutes', str(lead_minutes)))
+        if 'reservationPollIntervalSeconds' in payload:
+            try:
+                poll_interval = int(payload.get('reservationPollIntervalSeconds'))
+            except (TypeError, ValueError):
+                raise ValueError('预约轮询间隔必须是整数秒')
+            if poll_interval < MIN_POLL_INTERVAL_SECONDS or poll_interval > MAX_POLL_INTERVAL_SECONDS:
+                raise ValueError(f'预约轮询间隔必须在 {MIN_POLL_INTERVAL_SECONDS}-{MAX_POLL_INTERVAL_SECONDS} 秒之间')
+            updates.append(('reservation_poll_interval_seconds', str(poll_interval)))
 
         timestamp = now_iso()
         for key, value in updates:
@@ -113,7 +148,7 @@ class SettingsStore:
                 'configured': False,
                 'valid': False,
                 'reason': 'missing',
-                'message': '当前未配置可用 Token，请在设置页或 .env 中填写后重试。',
+                'message': '当前未配置可用 Token，请先在设置页或 .env 中填写。',
             }
 
         client = HaierClient(effective_token)

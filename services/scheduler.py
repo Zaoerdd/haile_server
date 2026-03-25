@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import threading
-import time
 from datetime import datetime
 from typing import Any, Dict
 
@@ -16,9 +15,10 @@ def now_iso() -> str:
 
 class ReservationScheduler:
     def __init__(self, interval_seconds: int = SCHEDULER_INTERVAL_SECONDS):
-        self.interval_seconds = max(interval_seconds, 5)
+        self.interval_seconds = max(int(interval_seconds), 5)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._lock = threading.Lock()
         self._running = False
         self.last_tick_at: str | None = None
@@ -30,6 +30,7 @@ class ReservationScheduler:
             if self._running:
                 return
             self._stop_event.clear()
+            self._wake_event.clear()
             self._thread = threading.Thread(target=self._run, name='reservation-scheduler', daemon=True)
             self._thread.start()
             self._running = True
@@ -39,9 +40,16 @@ class ReservationScheduler:
             if not self._running:
                 return
             self._stop_event.set()
+            self._wake_event.set()
             self._running = False
         if self._thread:
             self._thread.join(timeout=1)
+
+    def update_interval(self, seconds: int) -> int:
+        with self._lock:
+            self.interval_seconds = max(int(seconds), 5)
+            self._wake_event.set()
+            return self.interval_seconds
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -60,7 +68,9 @@ class ReservationScheduler:
                 self.last_error = None
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
-            self._stop_event.wait(self.interval_seconds)
+
+            self._wake_event.wait(self.interval_seconds)
+            self._wake_event.clear()
 
 
 reservation_scheduler = ReservationScheduler()

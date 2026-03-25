@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict
 
 from flask import Flask, jsonify, render_template, request
@@ -15,6 +16,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 
 workflow_manager = WorkflowManager()
+reservation_scheduler.update_interval(settings_store.get_effective_settings().reservation_poll_interval_seconds)
 reservation_scheduler.start()
 
 
@@ -102,17 +104,83 @@ def normalize_room(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def parse_datetime_value(value: Any) -> datetime | None:
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        try:
+            return datetime.fromtimestamp(timestamp).astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    candidates = [text.replace('Z', '+00:00')]
+    if ' ' in text and 'T' not in text:
+        candidates.append(text.replace(' ', 'T'))
+    for candidate in candidates:
+        try:
+            dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        return dt.astimezone() if dt.tzinfo else dt.astimezone()
+    return None
+
+
+def format_finish_time_text(value: Any) -> str:
+    dt = parse_datetime_value(value)
+    if not dt:
+        return ''
+    return dt.strftime('%H:%M')
+
+
+def build_machine_status(item: Dict[str, Any]) -> Dict[str, str]:
+    state_code = int(item.get('state') or 0)
+    state_desc = str(item.get('stateDesc') or '').strip()
+    finish_time_text = format_finish_time_text(item.get('finishTime'))
+
+    if state_code == 2 or any(keyword in state_desc for keyword in ('运行', '洗涤', '烘干', '脱水')):
+        return {
+            'statusLabel': '运行中',
+            'statusDetail': f'预计完成 {finish_time_text}' if finish_time_text else '运行中',
+            'finishTimeText': finish_time_text,
+        }
+    if state_code == 1 or '空闲' in state_desc:
+        return {
+            'statusLabel': '空闲',
+            'statusDetail': '空闲，可预约' if bool(item.get('enableReserve')) else '空闲',
+            'finishTimeText': '',
+        }
+    if state_desc:
+        return {
+            'statusLabel': '不可用',
+            'statusDetail': state_desc,
+            'finishTimeText': finish_time_text,
+        }
+    return {
+        'statusLabel': '不可用',
+        'statusDetail': '设备暂不可用',
+        'finishTimeText': finish_time_text,
+    }
+
+
 def normalize_machine(item: Dict[str, Any], scan_mapping: Dict[str, str] | None = None) -> Dict[str, Any]:
     state_code = int(item.get('state') or 0)
-    state_map = {1: '空闲', 2: '运行中', 3: '离线/不可用'}
+    status = build_machine_status(item)
     return {
         'goodsId': str(item.get('id') or ''),
         'deviceId': str(item.get('deviceId') or ''),
         'name': item.get('name') or '未命名设备',
         'floorCode': item.get('floorCode') or '',
         'state': state_code,
-        'stateDesc': state_map.get(state_code, '未知状态'),
+        'stateDesc': str(item.get('stateDesc') or status['statusLabel']),
         'finishTime': item.get('finishTime'),
+        'finishTimeText': status['finishTimeText'],
+        'statusLabel': status['statusLabel'],
+        'statusDetail': status['statusDetail'],
         'enableReserve': bool(item.get('enableReserve')),
         'reserveState': item.get('reserveState'),
         'supportsVirtualScan': bool(scan_mapping),
@@ -251,6 +319,7 @@ def update_settings():
         settings = settings_store.update_settings(data)
     except ValueError as exc:
         return json_error(str(exc), error_type='invalid_settings')
+    reservation_scheduler.update_interval(settings.reservation_poll_interval_seconds)
     return jsonify(
         {
             'status': 'success',
@@ -590,8 +659,8 @@ def get_modes():
 def start_process():
     data = request.get_json(force=True) or {}
     token = get_required_token(data)
-    qr_code = data.get('qr_code')
-    mode_id = data.get('mode_id')
+    qr_code = data.get('qr_code') or data.get('qrCode')
+    mode_id = data.get('mode_id') or data.get('modeId')
     if not qr_code or mode_id in (None, ''):
         return json_error('缺少机器编号或模式编号', error_type='missing_params')
     if not token:
@@ -608,9 +677,9 @@ def start_process():
 def process_next():
     data = request.get_json(force=True) or {}
     token = get_required_token(data)
-    process_id = data.get('process_id')
+    process_id = data.get('process_id') or data.get('processId')
     if not process_id:
-        return json_error('缺少 process_id', error_type='missing_process_id')
+        return json_error('缺少 processId', error_type='missing_process_id')
     if not token:
         return jsonify(build_token_missing_payload()), 400
 
@@ -622,9 +691,9 @@ def process_next():
 @app.route('/api/process/reset', methods=['POST'])
 def process_reset():
     data = request.get_json(force=True) or {}
-    process_id = data.get('process_id')
+    process_id = data.get('process_id') or data.get('processId')
     token = resolve_token(data) or None
-    cleanup_remote = bool(data.get('cleanup_remote', False))
+    cleanup_remote = bool(data.get('cleanup_remote', data.get('cleanupRemote', False)))
     if process_id:
         if cleanup_remote and not token:
             return jsonify(build_token_missing_payload()), 400
@@ -632,6 +701,26 @@ def process_reset():
         status_code = 200 if result.get('status') == 'success' else 400
         return jsonify(result), status_code
     return jsonify({'status': 'success', 'msg': '流程已重置。'})
+
+
+@app.route('/api/processes/active', methods=['GET'])
+def active_processes():
+    token = get_required_token()
+    if not token:
+        return jsonify(build_token_missing_payload()), 400
+    items = workflow_manager.list_active_processes(token)
+    return jsonify({'status': 'success', 'items': items})
+
+
+@app.route('/api/processes/<process_id>', methods=['GET'])
+def process_detail(process_id: str):
+    token = get_required_token()
+    if not token:
+        return jsonify(build_token_missing_payload()), 400
+    item = workflow_manager.get_process_details(process_id, token)
+    if not item:
+        return json_error('流程不存在', error_type='process_not_found', status_code=404)
+    return jsonify({'status': 'success', 'process': item})
 
 
 @app.route('/api/get_orders', methods=['POST'])

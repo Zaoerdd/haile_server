@@ -78,6 +78,26 @@ class Database:
 
         CREATE INDEX IF NOT EXISTS idx_reservation_events_task_created
         ON reservation_events(task_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS workflow_processes (
+            process_id TEXT PRIMARY KEY,
+            flow_type TEXT NOT NULL,
+            qr_code TEXT NOT NULL,
+            mode_id INTEGER NOT NULL,
+            current_step INTEGER NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            terminated INTEGER NOT NULL DEFAULT 0,
+            blocked_reason TEXT,
+            goods_id TEXT,
+            hash_key TEXT,
+            order_no TEXT,
+            prepay_param TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_processes_active
+        ON workflow_processes(completed, terminated, order_no, updated_at DESC);
         """
         with self._lock:
             with self.connect() as connection:

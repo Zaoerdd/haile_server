@@ -344,6 +344,48 @@ label > select {
     gap: 12px;
 }
 
+.process-step-list {
+    display: grid;
+    gap: 10px;
+}
+
+.process-step {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.62);
+    border: 1px solid rgba(103, 77, 52, 0.1);
+}
+
+.process-step.warning {
+    background: var(--warning-soft);
+    border-color: rgba(196, 122, 21, 0.18);
+}
+
+.process-step.success {
+    background: var(--success-soft);
+    border-color: rgba(47, 125, 82, 0.18);
+}
+
+.process-step.danger {
+    background: var(--danger-soft);
+    border-color: rgba(201, 72, 63, 0.18);
+}
+
+.process-step strong {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.process-step p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.5;
+}
+
 .machine-card,
 .list-card,
 .order-card {

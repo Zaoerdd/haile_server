@@ -11,6 +11,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
@@ -18,10 +19,12 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String HOME_URL = "http://8.135.10.38:8080";
     private static final String RETRY_SCHEME = "haile://retry";
+    private static final long EXIT_INTERVAL_MS = 2000L;
 
     private WebView myWebView;
     private SwipeRefreshLayout swipeRefreshLayout;
     private String lastRequestedUrl = HOME_URL;
+    private long lastBackPressedAt = 0L;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -34,6 +37,7 @@ public class MainActivity extends AppCompatActivity {
 
         setupSwipeRefresh();
         setupWebView();
+        setupBackNavigation();
         loadUrl(HOME_URL);
     }
 
@@ -131,13 +135,24 @@ public class MainActivity extends AppCompatActivity {
         Toast.makeText(this, "Unable to reach the server. Please check the network and try again.", Toast.LENGTH_LONG).show();
     }
 
-    @SuppressLint("GestureBackNavigation")
-    @Override
-    public void onBackPressed() {
-        if (myWebView.canGoBack()) {
-            myWebView.goBack();
-            return;
-        }
-        super.onBackPressed();
+    private void setupBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (myWebView.canGoBack()) {
+                    myWebView.goBack();
+                    return;
+                }
+
+                long now = System.currentTimeMillis();
+                if (now - lastBackPressedAt < EXIT_INTERVAL_MS) {
+                    finish();
+                    return;
+                }
+
+                lastBackPressedAt = now;
+                Toast.makeText(MainActivity.this, "再按一次退出", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 }
