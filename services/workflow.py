@@ -19,6 +19,9 @@ STEP_LABELS = {
     6: '已完成',
 }
 
+MANUAL_SCAN_FLOW_TYPE = 'scan_manual'
+ATTACHED_SCAN_FLOW_TYPE = 'scan_attached'
+
 MACHINE_IDENTIFIER_KEYS = {
     'goodsId',
     'goodsCode',
@@ -167,7 +170,12 @@ class WorkflowManager:
         if cleanup_result.get('status') != 'success':
             return cleanup_result
 
-        state = ProcessState(process_id=uuid.uuid4().hex, qr_code=qr_code, mode_id=int(mode_id))
+        state = ProcessState(
+            process_id=uuid.uuid4().hex,
+            qr_code=qr_code,
+            mode_id=int(mode_id),
+            flow_type=MANUAL_SCAN_FLOW_TYPE,
+        )
         self._save_state(state)
         return {
             'status': 'success',
@@ -276,13 +284,15 @@ class WorkflowManager:
                 process_id=uuid.uuid4().hex,
                 qr_code=normalized_qr_code,
                 mode_id=int(mode_id),
+                flow_type=ATTACHED_SCAN_FLOW_TYPE,
                 current_step=3,
             )
         else:
             state.qr_code = normalized_qr_code
             state.mode_id = int(mode_id)
 
-        state.flow_type = 'scan'
+        if not state.flow_type or state.flow_type == 'scan':
+            state.flow_type = ATTACHED_SCAN_FLOW_TYPE
         state.context['order_no'] = normalized_order_no
         if goods_id:
             state.context['goods_id'] = str(goods_id)
@@ -621,7 +631,13 @@ class WorkflowManager:
             state.blocked_reason = None
             return self._success(state, '订单已支付并启动，流程已自动完成。', detail_res.get('raw'))
         if classification == 'pending':
-            self._apply_pending_detail_to_state(state, detail)
+            if state.flow_type == MANUAL_SCAN_FLOW_TYPE:
+                self._hydrate_context_from_detail(state, detail)
+                state.completed = False
+                state.terminated = False
+                state.blocked_reason = None
+            else:
+                self._apply_pending_detail_to_state(state, detail)
             return None
         self._hydrate_context_from_detail(state, detail)
         state.blocked_reason = None
