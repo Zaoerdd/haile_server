@@ -172,6 +172,7 @@ class ReservationTask:
 class ReservationService:
     def __init__(self) -> None:
         database.init()
+        self._workflow_manager: Any | None = None
 
     def _fetch_task(self, task_id: int) -> ReservationTask | None:
         row = database.fetch_one('SELECT * FROM reservation_tasks WHERE id = ?', (task_id,))
@@ -220,7 +221,57 @@ class ReservationService:
         start_at, hold_until = build_windows(target_time, lead_minutes)
         return to_iso(start_at) or '', to_iso(hold_until) or ''
 
+    def _get_workflow_manager(self):
+        if self._workflow_manager is None:
+            from services.workflow import WorkflowManager
+
+            self._workflow_manager = WorkflowManager()
+        return self._workflow_manager
+
+    def _find_active_process_id(self, order_no: str | None) -> str | None:
+        normalized = str(order_no or '').strip()
+        if not normalized:
+            return None
+        row = database.fetch_one(
+            '''
+            SELECT process_id
+            FROM workflow_processes
+            WHERE order_no = ?
+              AND completed = 0
+              AND terminated = 0
+            ORDER BY updated_at DESC
+            LIMIT 1
+            ''',
+            (normalized,),
+        )
+        return str(row['process_id']) if row else None
+
+    def _ensure_process_for_task(
+        self,
+        task: ReservationTask,
+        token: str,
+        order_no: str | None,
+        detail: Dict[str, Any] | None = None,
+    ) -> str | None:
+        normalized = str(order_no or '').strip()
+        if not normalized or not task.qr_code:
+            return None
+
+        try:
+            self._get_workflow_manager().ensure_process_for_order(
+                token=token,
+                qr_code=task.qr_code,
+                mode_id=task.mode_id,
+                order_no=normalized,
+                goods_id=task.machine_id if task.machine_source != 'scan' else None,
+                detail=detail,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        return self._find_active_process_id(normalized)
+
     def list_tasks(self) -> list[Dict[str, Any]]:
+        token = settings_store.get_effective_settings().token
         rows = database.fetch_all(
             '''
             SELECT *
@@ -230,7 +281,15 @@ class ReservationService:
             '''
         )
         tasks = [ReservationTask.from_row(row) for row in rows]
-        return [task.to_dict(self._fetch_last_event(task.id)) for task in tasks]
+        items: list[Dict[str, Any]] = []
+        for task in tasks:
+            item = task.to_dict(self._fetch_last_event(task.id))
+            process_id = self._find_active_process_id(task.active_order_no)
+            if not process_id and token and task.active_order_no:
+                process_id = self._ensure_process_for_task(task, token, task.active_order_no)
+            item['processId'] = process_id
+            items.append(item)
+        return items
 
     def _has_conflict(self, machine_source: str, machine_id: str, schedule_type: str, target_time: datetime, lead_minutes: int, weekday: int | None, time_of_day: str | None) -> bool:
         rows = database.fetch_all(
@@ -605,15 +664,21 @@ class ReservationService:
                     self._record_event(task.id, 'order_create_failed', str(result), {'detail': detail})
                     continue
                 order_no = str(result)
+                process_id = self._ensure_process_for_task(task, token, order_no, detail if isinstance(detail, dict) else None)
                 if source == 'adopted':
                     adopted_count += 1
                     self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
-                    self._record_event(task.id, 'existing_order_adopted', '\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002', {'orderNo': order_no})
+                    self._record_event(
+                        task.id,
+                        'existing_order_adopted',
+                        '\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002',
+                        {'orderNo': order_no, 'processId': process_id},
+                    )
                     self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
                     continue
                 created_count += 1
                 self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
-                self._record_event(task.id, 'order_created', '预约订单已创建并进入保单窗口。', {'orderNo': order_no})
+                self._record_event(task.id, 'order_created', '预约订单已创建并进入保单窗口。', {'orderNo': order_no, 'processId': process_id})
                 self._notify('预约订单已创建', f'{task.title}\n订单号：{order_no}')
                 continue
 
@@ -629,6 +694,7 @@ class ReservationService:
             self._update_task(task.id, last_checked_at=to_iso(now), last_error=None)
 
             if classification == 'pending':
+                self._ensure_process_for_task(task, token, task.active_order_no, detail)
                 if task.status != 'holding':
                     self._update_task(task.id, status='holding')
                 continue
@@ -651,6 +717,7 @@ class ReservationService:
                     self._record_event(task.id, 'order_closed', '原订单已失效，等待下一轮补建。', {'orderNo': task.active_order_no})
                     continue
                 order_no = str(result)
+                process_id = self._ensure_process_for_task(task, token, order_no, recreate_detail if isinstance(recreate_detail, dict) else None)
                 if source == 'adopted':
                     adopted_count += 1
                     self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
@@ -658,13 +725,13 @@ class ReservationService:
                         task.id,
                         'existing_order_adopted',
                         '\u539f\u8ba2\u5355\u5931\u6548\u540e\uff0c\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u65b0\u7684\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002',
-                        {'orderNo': order_no, 'previousOrderNo': previous_order_no},
+                        {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
                     )
                     self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
                     continue
                 recreated_count += 1
                 self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
-                self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建。', {'orderNo': order_no, 'detail': recreate_detail})
+                self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建。', {'orderNo': order_no, 'detail': recreate_detail, 'processId': process_id})
                 self._notify('预约订单已补建', f'{task.title}\n新订单号：{order_no}')
                 continue
 

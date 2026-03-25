@@ -1397,6 +1397,7 @@ function renderReservationCard(task) {
             ${lastEvent.message ? `<div class="spacer-sm"></div><div class="callout">${escapeHtml(lastEvent.message)}</div>` : ''}
             <div class="spacer-sm"></div>
             <div class="action-row">
+                ${task.processId ? `<button class="btn btn-primary" type="button" data-action="continue-reservation-process" data-task-id="${escapeHtml(String(task.id))}" data-process-id="${escapeHtml(task.processId)}">继续流程</button>` : ''}
                 ${task.status === 'paused' ? `<button class="btn btn-secondary" type="button" data-action="resume-reservation" data-task-id="${escapeHtml(String(task.id))}">恢复</button>` : `<button class="btn btn-light" type="button" data-action="pause-reservation" data-task-id="${escapeHtml(String(task.id))}">暂停</button>`}
                 <button class="btn btn-danger" type="button" data-action="delete-reservation" data-task-id="${escapeHtml(String(task.id))}">删除</button>
             </div>
@@ -1864,35 +1865,52 @@ async function handleReservationClick(event) {
     }
 
     const action = button.dataset.action;
+    if (action === 'continue-reservation-process') {
+        if (!ensureTokenReady()) {
+            return;
+        }
+        try {
+            switchTab('washTab', { pushHistory: false });
+            await openProcess(button.dataset.processId);
+        } catch (error) {
+            handleRequestError(error, '恢复预约流程失败，请稍后重试。');
+        }
+        return;
+    }
+
     const taskId = button.dataset.taskId;
     if (!taskId) {
         return;
     }
 
-    if (action === 'pause-reservation') {
-        const data = await apiPost(`/api/reservations/${taskId}/pause`, {});
-        showToastMessage(data.msg || '预约任务已暂停。');
+    try {
+        if (action === 'pause-reservation') {
+            const data = await apiPost(`/api/reservations/${taskId}/pause`, {});
+            showToastMessage(data.msg || '预约任务已暂停。');
+            await loadReservations();
+            return;
+        }
+
+        if (action === 'resume-reservation') {
+            const data = await apiPost(`/api/reservations/${taskId}/resume`, {});
+            showToastMessage(data.msg || '预约任务已恢复。');
+            await loadReservations();
+            return;
+        }
+
+        if (action !== 'delete-reservation') {
+            return;
+        }
+
+        if (!(await showConfirmDialog('确定删除这个预约任务吗？'))) {
+            return;
+        }
+        const data = await apiDelete(`/api/reservations/${taskId}`);
+        showToastMessage(data.msg || '预约任务已删除。');
         await loadReservations();
-        return;
+    } catch (error) {
+        handleRequestError(error, '预约操作失败，请稍后重试。');
     }
-
-    if (action === 'resume-reservation') {
-        const data = await apiPost(`/api/reservations/${taskId}/resume`, {});
-        showToastMessage(data.msg || '预约任务已恢复。');
-        await loadReservations();
-        return;
-    }
-
-    if (action !== 'delete-reservation') {
-        return;
-    }
-
-    if (!(await showConfirmDialog('确定删除这个预约任务吗？'))) {
-        return;
-    }
-    const data = await apiDelete(`/api/reservations/${taskId}`);
-    showToastMessage(data.msg || '预约任务已删除。');
-    await loadReservations();
 }
 
 async function handleOrderClick(event) {

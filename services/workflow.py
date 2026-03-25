@@ -233,11 +233,101 @@ class WorkflowManager:
         row = database.fetch_one('SELECT * FROM workflow_processes WHERE process_id = ?', (process_id,))
         return ProcessState.from_row(row) if row else None
 
+    def get_by_order_no(self, order_no: str) -> Optional[ProcessState]:
+        row = database.fetch_one(
+            '''
+            SELECT *
+            FROM workflow_processes
+            WHERE order_no = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            ''',
+            (order_no,),
+        )
+        return ProcessState.from_row(row) if row else None
+
     def get_process_details(self, process_id: str, token: str) -> Optional[Dict[str, Any]]:
         state = self.get(process_id)
         if not state:
             return None
         return self._build_process_payload(state, token=token, sync_remote=True)
+
+    def ensure_process_for_order(
+        self,
+        token: str,
+        qr_code: str,
+        mode_id: int,
+        order_no: str,
+        *,
+        goods_id: str | None = None,
+        hash_key: str | None = None,
+        detail: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        normalized_order_no = str(order_no or '').strip()
+        normalized_qr_code = str(qr_code or '').strip()
+        if not normalized_order_no:
+            raise ValueError('order_no is required')
+        if not normalized_qr_code:
+            raise ValueError('qr_code is required')
+
+        state = self.get_by_order_no(normalized_order_no)
+        if not state:
+            state = ProcessState(
+                process_id=uuid.uuid4().hex,
+                qr_code=normalized_qr_code,
+                mode_id=int(mode_id),
+                current_step=3,
+            )
+        else:
+            state.qr_code = normalized_qr_code
+            state.mode_id = int(mode_id)
+
+        state.flow_type = 'scan'
+        state.context['order_no'] = normalized_order_no
+        if goods_id:
+            state.context['goods_id'] = str(goods_id)
+        if hash_key is not None:
+            state.context['hash_key'] = str(hash_key)
+        elif 'hash_key' not in state.context:
+            state.context['hash_key'] = ''
+
+        client = HaierClient(token)
+        if not state.context.get('goods_id') or not state.context.get('hash_key'):
+            scan_res = client.scan_goods(normalized_qr_code)
+            if scan_res.get('ok'):
+                scan_data = scan_res.get('data') or {}
+                scanned_goods_id = scan_data.get('goodsId')
+                if scanned_goods_id and not state.context.get('goods_id'):
+                    state.context['goods_id'] = str(scanned_goods_id)
+                if not state.context.get('hash_key'):
+                    state.context['hash_key'] = str(scan_data.get('activityHashKey') or '')
+
+        if detail is None:
+            detail_res = client.order_detail(normalized_order_no)
+            if detail_res.get('ok'):
+                detail = detail_res.get('data') or {}
+
+        self._hydrate_context_from_detail(state, detail or {})
+        classification = self._classify_order_detail(detail or {})
+        if classification == 'closed':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '订单已关闭或失效，流程无法继续。'
+        elif classification in {'running', 'completed'}:
+            state.completed = True
+            state.terminated = False
+            state.current_step = 6
+            state.blocked_reason = None
+        elif classification == 'pending':
+            self._apply_pending_detail_to_state(state, detail or {})
+        else:
+            state.completed = False
+            state.terminated = False
+            state.blocked_reason = None
+            state.current_step = state.current_step if 1 <= state.current_step <= 5 else 3
+
+        self._save_state(state)
+        return state.to_dict()
 
     def list_active_processes(self, token: str) -> List[Dict[str, Any]]:
         rows = database.fetch_all(
@@ -521,15 +611,48 @@ class WorkflowManager:
         classification = self._classify_order_detail(detail)
         if classification == 'closed':
             state.terminated = True
+            state.completed = False
             state.blocked_reason = '订单已关闭或失效，流程无法继续。'
             return self._error('process_blocked', state.blocked_reason, state, detail_res.get('raw'))
         if classification in {'running', 'completed'}:
             state.completed = True
+            state.terminated = False
             state.current_step = 6
             state.blocked_reason = None
             return self._success(state, '订单已支付并启动，流程已自动完成。', detail_res.get('raw'))
+        if classification == 'pending':
+            self._apply_pending_detail_to_state(state, detail)
+            return None
+        self._hydrate_context_from_detail(state, detail)
         state.blocked_reason = None
         return None
+
+    def _hydrate_context_from_detail(self, state: ProcessState, detail: Dict[str, Any]) -> None:
+        if not detail:
+            return
+        order_item = (detail.get('orderItemList') or [{}])[0]
+        goods_id = order_item.get('goodsId') or detail.get('goodsId')
+        if goods_id and not state.context.get('goods_id'):
+            state.context['goods_id'] = str(goods_id)
+        if 'hash_key' not in state.context:
+            state.context['hash_key'] = ''
+
+    def _resolve_pending_step(self, detail: Dict[str, Any]) -> int:
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
+        if can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc:
+            return 5
+        return 3
+
+    def _apply_pending_detail_to_state(self, state: ProcessState, detail: Dict[str, Any]) -> None:
+        self._hydrate_context_from_detail(state, detail)
+        desired_step = self._resolve_pending_step(detail)
+        current_step = state.current_step if 1 <= state.current_step <= 5 else 3
+        state.current_step = max(3, current_step, desired_step)
+        state.completed = False
+        state.terminated = False
+        state.blocked_reason = None
 
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
         state = int(detail.get('state') or 0)
