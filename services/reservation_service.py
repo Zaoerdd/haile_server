@@ -320,6 +320,25 @@ class ReservationService:
             },
         }
 
+    def _is_payable_pending_detail(self, detail: Dict[str, Any]) -> bool:
+        if self._classify_order_detail(detail) != 'pending':
+            return False
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
+        return can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc
+
+    def _refresh_payable_pending_detail(self, client: HaierClient, order_no: str, detail: Dict[str, Any]) -> Dict[str, Any]:
+        normalized_order_no = str(order_no or '').strip()
+        if not normalized_order_no or not self._is_payable_pending_detail(detail):
+            return detail
+
+        refreshed_res = client.order_detail(normalized_order_no)
+        if not refreshed_res.get('ok'):
+            return detail
+        refreshed_detail = refreshed_res.get('data') or {}
+        return refreshed_detail if isinstance(refreshed_detail, dict) and refreshed_detail else detail
+
     def _get_snapshot_invalid_at(self, snapshot: Dict[str, Any] | None) -> datetime | None:
         if not snapshot:
             return None
@@ -668,6 +687,7 @@ class ReservationService:
             detail = detail_res.get('data') or {}
             if self._classify_order_detail(detail) != 'pending':
                 continue
+            detail = self._refresh_payable_pending_detail(client, order_no, detail)
             sort_key = str(order.get('updateTime') or order.get('gmtModified') or order.get('createTime') or '')
             candidates.append((sort_key, order_no, detail))
 
@@ -708,7 +728,9 @@ class ReservationService:
         detail_res = client.order_detail(order_no)
         if not detail_res.get('ok'):
             return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
-        return True, order_no, detail_res.get('data') or {}, 'created'
+        detail = detail_res.get('data') or {}
+        detail = self._refresh_payable_pending_detail(client, order_no, detail)
+        return True, order_no, detail, 'created'
 
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
         state = int(detail.get('state') or 0)
