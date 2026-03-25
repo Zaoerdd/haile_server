@@ -302,6 +302,9 @@ function startLiveClock() {
         if (state.activeTab === 'washTab' && state.wash.view === 'process' && state.wash.process) {
             renderWash();
         }
+        if (state.activeTab === 'reservationTab' && state.reservations.items.length) {
+            renderReservations();
+        }
         if (state.activeTab === 'orderTab' && (state.orders.activeProcesses.length || state.orders.items.length)) {
             renderOrders();
         }
@@ -1227,7 +1230,7 @@ function renderOrders() {
 
     const activeProcesses = state.orders.activeProcesses || [];
     const items = state.orders.items || [];
-    const activeOrderNos = new Set(activeProcesses.map(item => item.orderNo).filter(Boolean));
+    const processByOrderNo = new Map(activeProcesses.filter(item => item && item.orderNo).map(item => [item.orderNo, item]));
 
     el.ordersList.innerHTML = `
         <section class="panel-card">
@@ -1251,7 +1254,7 @@ function renderOrders() {
                 <span class="chip pending">${state.orders.total || items.length} 条</span>
             </div>
             <div class="order-list">
-                ${items.length ? items.map(order => renderHistoryOrderCard(order, activeOrderNos.has(order.orderNo))).join('') : renderEmptyState('暂无订单', '当前没有可显示的历史订单。')}
+                ${items.length ? items.map(order => renderHistoryOrderCard(order, processByOrderNo.get(order.orderNo) || null)).join('') : renderEmptyState('暂无订单', '当前没有可显示的历史订单。')}
             </div>
         </section>
     `;
@@ -1378,6 +1381,7 @@ function renderRoomMachineCard(machine) {
 function renderReservationCard(task) {
     const lastEvent = task.lastEvent || {};
     const statusClass = reservationStatusClass(task.status);
+    const currentOrder = task.currentOrder || null;
     return `
         <article class="order-card">
             <div class="card-title">
@@ -1391,8 +1395,11 @@ function renderReservationCard(task) {
                 <div><span>目标时间</span><span>${escapeHtml(formatDateTime(task.targetTime))}</span></div>
                 <div><span>保单窗口</span><span>${escapeHtml(formatWindow(task.startAt, task.holdUntil))}</span></div>
                 <div><span>活跃订单</span><span>${escapeHtml(task.activeOrderNo || '--')}</span></div>
+                <div><span>订单状态</span><span>${escapeHtml((currentOrder || {}).stateDesc || '--')}</span></div>
                 <div><span>最近检查</span><span>${escapeHtml(formatDateTime(task.lastCheckedAt))}</span></div>
+                <div><span>页面状态</span><span>${escapeHtml((currentOrder || {}).pageCode || '--')}</span></div>
             </div>
+            ${renderOrderTimeGrid(currentOrder)}
             ${task.lastError ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(task.lastError)}</div>` : ''}
             ${lastEvent.message ? `<div class="spacer-sm"></div><div class="callout">${escapeHtml(lastEvent.message)}</div>` : ''}
             <div class="spacer-sm"></div>
@@ -1433,26 +1440,32 @@ function renderActiveProcessCard(process) {
     `;
 }
 
-function renderHistoryOrderCard(order, hasProcess) {
+function renderHistoryOrderCard(order, activeProcess) {
     const expanded = Boolean(state.orders.expanded[order.orderNo]);
+    const processOrder = activeProcess ? (activeProcess.order || null) : null;
     const detail = cache.orderDetails.get(order.orderNo);
-    const buttonSwitch = detail ? (detail.buttonSwitch || {}) : {};
-    const timeMeta = getOrderTimeMeta(detail || order);
+    const mergedOrder = {
+        ...(order || {}),
+        ...(processOrder || {}),
+        ...(detail || {}),
+    };
+    const buttonSwitch = mergedOrder.buttonSwitch || {};
+    const timeMeta = getOrderTimeMeta(mergedOrder);
     return `
         <article class="order-card">
             <div class="card-title">
                 <div>
-                    <h4>${escapeHtml(order.machineName || '订单')}</h4>
-                    <p>${escapeHtml(order.modeName || '--')} · ${escapeHtml(order.orderNo || '--')}</p>
+                    <h4>${escapeHtml(mergedOrder.machineName || order.machineName || '订单')}</h4>
+                    <p>${escapeHtml(mergedOrder.modeName || order.modeName || '--')} · ${escapeHtml(order.orderNo || '--')}</p>
                 </div>
                 <div class="inline-row">
-                    ${hasProcess ? '<span class="chip warning">流程进行中</span>' : ''}
-                    <span class="chip ${orderChipClass(order.state)}">${escapeHtml(order.stateDesc || '未知状态')}</span>
+                    ${activeProcess ? '<span class="chip warning">流程进行中</span>' : ''}
+                    <span class="chip ${orderChipClass(mergedOrder.state)}">${escapeHtml(mergedOrder.stateDesc || order.stateDesc || '未知状态')}</span>
                 </div>
             </div>
             <div class="detail-grid">
-                <div><span>价格</span><span>${escapeHtml(stringOrFallback(order.price, '--'))}</span></div>
-                <div><span>创建时间</span><span>${escapeHtml(formatDateTime(order.createTime))}</span></div>
+                <div><span>价格</span><span>${escapeHtml(stringOrFallback(mergedOrder.price, '--'))}</span></div>
+                <div><span>创建时间</span><span>${escapeHtml(formatDateTime(mergedOrder.createTime || order.createTime))}</span></div>
                 ${timeMeta ? `<div><span>${escapeHtml(timeMeta.label)}</span><span>${escapeHtml(formatDateTime(timeMeta.value))}</span></div>` : ''}
                 ${timeMeta ? `<div><span>${escapeHtml(timeMeta.countdownLabel)}</span><span>${escapeHtml(timeMeta.countdownText)}</span></div>` : ''}
             </div>
@@ -1462,7 +1475,7 @@ function renderHistoryOrderCard(order, hasProcess) {
                 ${buttonSwitch.canCloseOrder ? `<button class="btn btn-danger" type="button" data-action="finish-order" data-order-no="${escapeHtml(order.orderNo)}">结束订单</button>` : ''}
                 ${buttonSwitch.canCancel ? `<button class="btn btn-light" type="button" data-action="cancel-order" data-order-no="${escapeHtml(order.orderNo)}">取消订单</button>` : ''}
             </div>
-            ${expanded ? renderOrderDetail(detail) : ''}
+            ${expanded ? renderOrderDetail(detail || processOrder || mergedOrder) : ''}
         </article>
     `;
 }

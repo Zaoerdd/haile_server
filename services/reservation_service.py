@@ -270,8 +270,40 @@ class ReservationService:
             return None
         return self._find_active_process_id(normalized)
 
+    def _extract_order_finish_time(self, detail: Dict[str, Any]) -> Any:
+        order_item = (detail.get('orderItemList') or [{}])[0]
+        fulfill_info = detail.get('fulfillInfo') or {}
+        fulfilling_item = fulfill_info.get('fulfillingItem') or {}
+        return fulfilling_item.get('finishTime') or order_item.get('finishTime') or detail.get('finishTime')
+
+    def _normalize_current_order(self, detail: Dict[str, Any]) -> Dict[str, Any]:
+        order_item = (detail.get('orderItemList') or [{}])[0]
+        buttons = detail.get('buttonSwitch') or {}
+        return {
+            'orderNo': detail.get('orderNo', ''),
+            'state': detail.get('state'),
+            'stateDesc': detail.get('stateDesc') or '未知状态',
+            'pageCode': detail.get('pageCode') or '',
+            'price': detail.get('realPrice') or detail.get('payAmount') or '0.00',
+            'createTime': detail.get('createTime'),
+            'payTime': detail.get('payTime'),
+            'completeTime': detail.get('completeTime'),
+            'finishTime': self._extract_order_finish_time(detail),
+            'invalidTime': detail.get('invalidTime'),
+            'machineName': order_item.get('goodsName') or detail.get('deviceName') or '未知设备',
+            'modeName': order_item.get('goodsItemName') or '未知模式',
+            'shopName': order_item.get('shopName') or (detail.get('positionInfo') or {}).get('positionName') or '',
+            'machineGoodsId': order_item.get('goodsId'),
+            'buttonSwitch': {
+                'canCancel': bool(buttons.get('canCancel')),
+                'canCloseOrder': bool(buttons.get('canCloseOrder')),
+                'canPay': bool(buttons.get('canPay')),
+            },
+        }
+
     def list_tasks(self) -> list[Dict[str, Any]]:
         token = settings_store.get_effective_settings().token
+        client = HaierClient(token) if token else None
         rows = database.fetch_all(
             '''
             SELECT *
@@ -284,10 +316,20 @@ class ReservationService:
         items: list[Dict[str, Any]] = []
         for task in tasks:
             item = task.to_dict(self._fetch_last_event(task.id))
-            process_id = self._find_active_process_id(task.active_order_no)
-            if not process_id and token and task.active_order_no:
-                process_id = self._ensure_process_for_task(task, token, task.active_order_no)
+            current_order = None
+            process_id = None
+            if client and task.active_order_no:
+                detail_res = client.order_detail(task.active_order_no)
+                if detail_res.get('ok'):
+                    detail = detail_res.get('data') or {}
+                    current_order = self._normalize_current_order(detail)
+                    process_id = self._ensure_process_for_task(task, token, task.active_order_no, detail)
+                else:
+                    process_id = self._find_active_process_id(task.active_order_no)
+            elif task.active_order_no:
+                process_id = self._find_active_process_id(task.active_order_no)
             item['processId'] = process_id
+            item['currentOrder'] = current_order
             items.append(item)
         return items
 
