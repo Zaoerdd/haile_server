@@ -50,7 +50,10 @@ def to_iso(value: datetime | None) -> str | None:
 def parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=now_local().tzinfo)
+    return parsed.astimezone()
 
 
 def parse_time_of_day(value: str) -> tuple[int, int]:
@@ -106,6 +109,7 @@ class ReservationTask:
     hold_until: datetime | None
     last_checked_at: datetime | None
     last_error: str | None
+    current_order_snapshot: str | None
     last_run_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -134,6 +138,7 @@ class ReservationTask:
             hold_until=parse_iso(row['hold_until']),
             last_checked_at=parse_iso(row['last_checked_at']),
             last_error=str(row['last_error']) if row['last_error'] is not None else None,
+            current_order_snapshot=str(row['current_order_snapshot']) if row['current_order_snapshot'] is not None else None,
             last_run_at=parse_iso(row['last_run_at']),
             created_at=parse_iso(row['created_at']) or now_local(),
             updated_at=parse_iso(row['updated_at']) or now_local(),
@@ -276,6 +281,20 @@ class ReservationService:
         fulfilling_item = fulfill_info.get('fulfillingItem') or {}
         return fulfilling_item.get('finishTime') or order_item.get('finishTime') or detail.get('finishTime')
 
+    def _serialize_current_order(self, order: Dict[str, Any] | None) -> str | None:
+        if not order:
+            return None
+        return json.dumps(order, ensure_ascii=False)
+
+    def _deserialize_current_order(self, snapshot: str | None) -> Dict[str, Any] | None:
+        if not snapshot:
+            return None
+        try:
+            payload = json.loads(snapshot)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def _normalize_current_order(self, detail: Dict[str, Any]) -> Dict[str, Any]:
         order_item = (detail.get('orderItemList') or [{}])[0]
         buttons = detail.get('buttonSwitch') or {}
@@ -301,9 +320,81 @@ class ReservationService:
             },
         }
 
+    def _get_snapshot_invalid_at(self, snapshot: Dict[str, Any] | None) -> datetime | None:
+        if not snapshot:
+            return None
+        return parse_iso(str(snapshot.get('invalidTime') or '').strip() or None)
+
+    def sync_task_order_snapshot(self, token: str, order_no: str) -> None:
+        normalized_order_no = str(order_no or '').strip()
+        if not token or not normalized_order_no:
+            return
+
+        detail_res = HaierClient(token).order_detail(normalized_order_no)
+        if not detail_res.get('ok'):
+            return
+
+        detail = detail_res.get('data') or {}
+        snapshot = self._normalize_current_order(detail)
+        classification = self._classify_order_detail(detail)
+        rows = database.fetch_all(
+            '''
+            SELECT *
+            FROM reservation_tasks
+            WHERE active_order_no = ?
+              AND status IN ('scheduled', 'holding', 'paused')
+            ''',
+            (normalized_order_no,),
+        )
+
+        now = to_iso(now_local()) or ''
+        for row in rows:
+            task = ReservationTask.from_row(row)
+            if classification == 'pending':
+                if not self._find_active_process_id(normalized_order_no):
+                    self._ensure_process_for_task(task, token, normalized_order_no, detail)
+                self._update_task(
+                    task.id,
+                    status='holding',
+                    current_order_snapshot=self._serialize_current_order(snapshot),
+                    last_checked_at=now,
+                    last_error=None,
+                )
+                continue
+
+            if classification in {'completed', 'running'}:
+                if task.schedule_type == 'weekly':
+                    self._advance_weekly_task(task, '检测到订单已支付并开始运行，任务已滚动到下一周。')
+                else:
+                    self._update_task(
+                        task.id,
+                        status='completed',
+                        current_order_snapshot=self._serialize_current_order(snapshot),
+                        last_checked_at=now,
+                        last_run_at=now,
+                        last_error=None,
+                    )
+                continue
+
+            if classification == 'closed':
+                self._update_task(
+                    task.id,
+                    status='scheduled',
+                    active_order_no=None,
+                    current_order_snapshot=None,
+                    last_checked_at=now,
+                    last_error='订单已失效，等待下一轮补建。',
+                )
+                continue
+
+            self._update_task(
+                task.id,
+                current_order_snapshot=self._serialize_current_order(snapshot),
+                last_checked_at=now,
+                last_error='订单状态未知，继续保留当前预约任务。',
+            )
+
     def list_tasks(self) -> list[Dict[str, Any]]:
-        token = settings_store.get_effective_settings().token
-        client = HaierClient(token) if token else None
         rows = database.fetch_all(
             '''
             SELECT *
@@ -316,20 +407,8 @@ class ReservationService:
         items: list[Dict[str, Any]] = []
         for task in tasks:
             item = task.to_dict(self._fetch_last_event(task.id))
-            current_order = None
-            process_id = None
-            if client and task.active_order_no:
-                detail_res = client.order_detail(task.active_order_no)
-                if detail_res.get('ok'):
-                    detail = detail_res.get('data') or {}
-                    current_order = self._normalize_current_order(detail)
-                    process_id = self._ensure_process_for_task(task, token, task.active_order_no, detail)
-                else:
-                    process_id = self._find_active_process_id(task.active_order_no)
-            elif task.active_order_no:
-                process_id = self._find_active_process_id(task.active_order_no)
-            item['processId'] = process_id
-            item['currentOrder'] = current_order
+            item['processId'] = self._find_active_process_id(task.active_order_no)
+            item['currentOrder'] = self._deserialize_current_order(task.current_order_snapshot)
             items.append(item)
         return items
 
@@ -477,7 +556,7 @@ class ReservationService:
         database.execute(
             '''
             UPDATE reservation_tasks
-            SET status = 'scheduled', active_order_no = NULL, last_error = NULL, updated_at = ?
+            SET status = 'scheduled', active_order_no = NULL, last_error = NULL, current_order_snapshot = NULL, updated_at = ?
             WHERE id = ?
             ''',
             (updated_at, task_id),
@@ -518,7 +597,7 @@ class ReservationService:
             database.execute(
                 '''
                 UPDATE reservation_tasks
-                SET status = 'paused', last_error = ?, updated_at = ?
+                SET status = 'paused', last_error = ?, current_order_snapshot = NULL, updated_at = ?
                 WHERE id = ?
                 ''',
                 (reason, to_iso(now_local()) or '', task.id),
@@ -660,6 +739,7 @@ class ReservationService:
             start_at=start_at_iso,
             hold_until=hold_until_iso,
             active_order_no=None,
+            current_order_snapshot=None,
             last_error=keep_error,
         )
         self._record_event(task.id, 'weekly_rolled', message, {'nextTargetTime': to_iso(next_target)})
@@ -694,7 +774,13 @@ class ReservationService:
                 if task.schedule_type == 'weekly':
                     self._advance_weekly_task(task, '上一个保单窗口结束，已滚动到下周。', keep_error='上一个保单窗口结束。')
                 else:
-                    self._update_task(task.id, status='failed', active_order_no=None, last_error='保单窗口已结束，任务未完成。')
+                    self._update_task(
+                        task.id,
+                        status='failed',
+                        active_order_no=None,
+                        current_order_snapshot=None,
+                        last_error='保单窗口已结束，任务未完成。',
+                    )
                     self._record_event(task.id, 'task_failed', '保单窗口已结束，任务未完成。')
                     self._notify('预约任务未完成', f'{task.title}\n保单窗口已结束。')
                 continue
@@ -706,10 +792,21 @@ class ReservationService:
                     self._record_event(task.id, 'order_create_failed', str(result), {'detail': detail})
                     continue
                 order_no = str(result)
+                current_order_snapshot = self._serialize_current_order(
+                    self._normalize_current_order(detail if isinstance(detail, dict) else {})
+                )
                 process_id = self._ensure_process_for_task(task, token, order_no, detail if isinstance(detail, dict) else None)
                 if source == 'adopted':
                     adopted_count += 1
-                    self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                    self._update_task(
+                        task.id,
+                        status='holding',
+                        active_order_no=order_no,
+                        current_order_snapshot=current_order_snapshot,
+                        last_checked_at=to_iso(now),
+                        last_run_at=to_iso(now),
+                        last_error=None,
+                    )
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
@@ -719,50 +816,74 @@ class ReservationService:
                     self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
                     continue
                 created_count += 1
-                self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                self._update_task(
+                    task.id,
+                    status='holding',
+                    active_order_no=order_no,
+                    current_order_snapshot=current_order_snapshot,
+                    last_checked_at=to_iso(now),
+                    last_run_at=to_iso(now),
+                    last_error=None,
+                )
                 self._record_event(task.id, 'order_created', '预约订单已创建并进入保单窗口。', {'orderNo': order_no, 'processId': process_id})
                 self._notify('预约订单已创建', f'{task.title}\n订单号：{order_no}')
                 continue
 
-            client = HaierClient(token)
-            detail_res = client.order_detail(task.active_order_no)
-            if not detail_res.get('ok'):
-                self._update_task(task.id, last_error=detail_res.get('msg') or '读取订单详情失败。', last_checked_at=to_iso(now))
-                self._record_event(task.id, 'order_detail_failed', detail_res.get('msg') or '读取订单详情失败。')
-                continue
-
-            detail = detail_res.get('data') or {}
-            classification = self._classify_order_detail(detail)
+            snapshot = self._deserialize_current_order(task.current_order_snapshot)
+            classification = self._classify_order_detail(snapshot or {})
             self._update_task(task.id, last_checked_at=to_iso(now), last_error=None)
 
             if classification == 'pending':
-                self._ensure_process_for_task(task, token, task.active_order_no, detail)
                 if task.status != 'holding':
                     self._update_task(task.id, status='holding')
-                continue
+                invalid_at = self._get_snapshot_invalid_at(snapshot)
+                if invalid_at and now < invalid_at:
+                    continue
+                if invalid_at is None and now <= hold_until:
+                    continue
+                classification = 'closed'
 
             if classification in {'completed', 'running'}:
                 completed_count += 1
+                state_desc = (snapshot or {}).get('stateDesc') or (snapshot or {}).get('state') or '未知状态'
                 if task.schedule_type == 'weekly':
                     self._advance_weekly_task(task, '检测到订单已支付并开始运行，任务已滚动到下一周。')
                 else:
-                    self._update_task(task.id, status='completed', last_run_at=to_iso(now))
+                    self._update_task(task.id, status='completed', last_run_at=to_iso(now), last_error=None)
                     self._record_event(task.id, 'task_completed', '检测到预约订单已支付完成，本次预约结束。', {'orderNo': task.active_order_no})
-                self._notify('预约任务已完成', f'{task.title}\n订单状态：{detail.get("stateDesc") or detail.get("state")}')
+                self._notify('预约任务已完成', f'{task.title}\n订单状态：{state_desc}')
                 continue
 
             if classification == 'closed':
                 previous_order_no = task.active_order_no
                 ok, result, recreate_detail, source = self._create_pending_order(task, token)
                 if not ok:
-                    self._update_task(task.id, active_order_no=None, status='scheduled', last_error=str(result), last_checked_at=to_iso(now))
+                    self._update_task(
+                        task.id,
+                        active_order_no=None,
+                        current_order_snapshot=None,
+                        status='scheduled',
+                        last_error=str(result),
+                        last_checked_at=to_iso(now),
+                    )
                     self._record_event(task.id, 'order_closed', '原订单已失效，等待下一轮补建。', {'orderNo': task.active_order_no})
                     continue
                 order_no = str(result)
+                current_order_snapshot = self._serialize_current_order(
+                    self._normalize_current_order(recreate_detail if isinstance(recreate_detail, dict) else {})
+                )
                 process_id = self._ensure_process_for_task(task, token, order_no, recreate_detail if isinstance(recreate_detail, dict) else None)
                 if source == 'adopted':
                     adopted_count += 1
-                    self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                    self._update_task(
+                        task.id,
+                        status='holding',
+                        active_order_no=order_no,
+                        current_order_snapshot=current_order_snapshot,
+                        last_checked_at=to_iso(now),
+                        last_run_at=to_iso(now),
+                        last_error=None,
+                    )
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
@@ -772,7 +893,15 @@ class ReservationService:
                     self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
                     continue
                 recreated_count += 1
-                self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                self._update_task(
+                    task.id,
+                    status='holding',
+                    active_order_no=order_no,
+                    current_order_snapshot=current_order_snapshot,
+                    last_checked_at=to_iso(now),
+                    last_run_at=to_iso(now),
+                    last_error=None,
+                )
                 self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建。', {'orderNo': order_no, 'detail': recreate_detail, 'processId': process_id})
                 self._notify('预约订单已补建', f'{task.title}\n新订单号：{order_no}')
                 continue

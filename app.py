@@ -692,6 +692,12 @@ def process_next():
         return jsonify(build_token_missing_payload()), 400
 
     result = workflow_manager.execute_next(process_id=str(process_id), token=token)
+    if result.get('status') == 'success':
+        process_payload = result.get('process') or {}
+        context_summary = process_payload.get('contextSummary') or {}
+        order_no = str(context_summary.get('orderNo') or '').strip()
+        if order_no:
+            reservation_service.sync_task_order_snapshot(token, order_no)
     status_code = 200 if result.get('status') == 'success' else 400
     return jsonify(result), status_code
 

@@ -55,6 +55,7 @@ class Database:
             hold_until TEXT,
             last_checked_at TEXT,
             last_error TEXT,
+            current_order_snapshot TEXT,
             last_run_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -102,6 +103,16 @@ class Database:
         with self._lock:
             with self.connect() as connection:
                 connection.executescript(schema)
+                self._ensure_column(connection, 'reservation_tasks', 'current_order_snapshot', 'TEXT')
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing_columns = {
+            str(row['name'])
+            for row in connection.execute(f'PRAGMA table_info({table})')
+        }
+        if column in existing_columns:
+            return
+        connection.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
 
     def fetch_one(self, query: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
         with self.connect() as connection:
