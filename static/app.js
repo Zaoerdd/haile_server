@@ -21,6 +21,8 @@ const DEFAULT_TOKEN_STATUS = {
     message: '当前未配置可用 Token，请前往设置页处理。',
 };
 
+const VALID_TABS = new Set(Object.keys(TAB_TITLES));
+
 const state = {
     activeTab: 'washTab',
     tokenStatus: { ...DEFAULT_TOKEN_STATUS },
@@ -78,6 +80,7 @@ const cache = {
 const el = {};
 
 document.addEventListener('DOMContentLoaded', async () => {
+    state.activeTab = getTabFromLocation();
     bindElements();
     bindEvents();
     initOrderObserver();
@@ -86,7 +89,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderReservations();
     renderOrders();
     renderSettings();
-    switchTab('washTab', { pushHistory: false });
+    switchTab(state.activeTab, { pushHistory: false });
 
     try {
         await loadConfig();
@@ -269,21 +272,36 @@ function buildHistoryState() {
     return payload;
 }
 
+function getTabFromLocation() {
+    const hash = (window.location.hash || '').replace(/^#/, '').trim();
+    if (VALID_TABS.has(hash)) {
+        return hash;
+    }
+    return 'washTab';
+}
+
+function buildHistoryUrl(tabId) {
+    const safeTab = VALID_TABS.has(tabId) ? tabId : 'washTab';
+    return `${window.location.pathname}${window.location.search}#${safeTab}`;
+}
+
 function pushHistoryState() {
     if (!state.historyReady || state.historyRestoring) {
         return;
     }
-    window.history.pushState(buildHistoryState(), '');
+    const payload = buildHistoryState();
+    window.history.pushState(payload, '', buildHistoryUrl(payload.tab));
 }
 
 function replaceHistoryState() {
-    window.history.replaceState(buildHistoryState(), '');
+    const payload = buildHistoryState();
+    window.history.replaceState(payload, '', buildHistoryUrl(payload.tab));
 }
 
 async function restoreHistoryState(navState) {
     state.historyRestoring = true;
     try {
-        const tab = navState && navState.tab ? navState.tab : 'washTab';
+        const tab = navState && navState.tab ? navState.tab : getTabFromLocation();
         switchTab(tab, { pushHistory: false });
 
         if (tab !== 'washTab') {

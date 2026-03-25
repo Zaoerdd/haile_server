@@ -112,7 +112,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshPage() {
         swipeRefreshLayout.setRefreshing(true);
-        loadUrl(lastRequestedUrl);
+        String currentUrl = myWebView.getUrl();
+        loadUrl(currentUrl != null ? currentUrl : lastRequestedUrl);
     }
 
     private String normalizeUrl(String url) {
