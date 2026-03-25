@@ -26,3 +26,7 @@ Thumbs.db
 .idea/
 *.swp
 *.log
+*.db
+
+# 其他
+haier_api_package/

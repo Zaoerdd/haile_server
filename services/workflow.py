@@ -172,6 +172,27 @@ class WorkflowManager:
         state.updated_at = time.time()
         return result
 
+    def run_full_process(self, token: str, qr_code: str, mode_id: int) -> Dict[str, Any]:
+        start_result = self.start_process(token=token, qr_code=qr_code, mode_id=mode_id)
+        if start_result.get('status') != 'success':
+            return start_result
+
+        process = start_result.get('process') or {}
+        process_id = process.get('processId')
+        if not process_id:
+            return self._error('process_not_found', '流程创建成功，但未返回 processId。')
+
+        last_result = start_result
+        while True:
+            current = last_result.get('process') or {}
+            if current.get('completed'):
+                return last_result
+            next_result = self.execute_next(process_id=process_id, token=token)
+            if next_result.get('status') != 'success':
+                next_result['cleanup'] = start_result.get('cleanup')
+                return next_result
+            last_result = next_result
+
     def cleanup_machine_orders(self, token: str, qr_code: str) -> Dict[str, Any]:
         client = HaierClient(token)
         scan_res = client.scan_goods(qr_code)

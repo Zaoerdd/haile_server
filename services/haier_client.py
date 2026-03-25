@@ -113,7 +113,49 @@ class HaierClient:
     def goods_details(self, goods_id: str) -> Dict[str, Any]:
         return self._request('GET', '/goods/normal/details', params={'goodsId': goods_id})
 
-    def create_order(self, goods_id: str, mode_id: int, hash_key: str) -> Dict[str, Any]:
+    def near_positions(self, lng: float, lat: float, page: int = 1, page_size: int = 10) -> Dict[str, Any]:
+        return self._request(
+            'POST',
+            '/position/nearPosition',
+            json={'lng': lng, 'lat': lat, 'page': page, 'pageSize': page_size},
+        )
+
+    def use_position_list(self, lng: float, lat: float, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        return self._request(
+            'POST',
+            '/position/usePositionList',
+            json={'lng': lng, 'lat': lat, 'page': page, 'pageSize': page_size},
+        )
+
+    def position_detail(self, position_id: str) -> Dict[str, Any]:
+        return self._request('GET', '/position/positionDetail', params={'id': position_id})
+
+    def floor_code_list(self, position_id: str) -> Dict[str, Any]:
+        return self._request('GET', '/position/floorCodeList', params={'positionId': position_id})
+
+    def position_device(self, position_id: str) -> Dict[str, Any]:
+        return self._request('GET', '/position/positionDevice', params={'id': position_id})
+
+    def device_detail_page(self, position_id: str, category_code: str = '00', page: int = 1, page_size: int = 50, floor_code: str = '') -> Dict[str, Any]:
+        return self._request(
+            'POST',
+            '/position/deviceDetailPage',
+            json={
+                'positionId': str(position_id),
+                'categoryCode': category_code,
+                'page': page,
+                'floorCode': floor_code,
+                'pageSize': page_size,
+            },
+        )
+
+    def goods_last_run_info(self, goods_id: int | str, category_code: str = '00') -> Dict[str, Any]:
+        return self._request('POST', '/goods/last/runInfo', json={'goodsId': int(goods_id), 'categoryCode': category_code})
+
+    def goods_verify(self, goods_id: int | str, category_code: str = '00') -> Dict[str, Any]:
+        return self._request('POST', '/goods/verify', json={'goodsId': int(goods_id), 'categoryCode': category_code})
+
+    def create_scan_order(self, goods_id: str, mode_id: int, hash_key: str) -> Dict[str, Any]:
         payload = {
             'optionalInfo': {},
             'purchaseList': [
@@ -129,8 +171,41 @@ class HaierClient:
         }
         return self._request('POST', '/trade/scanOrderCreate', json=payload)
 
+    def create_order(self, goods_id: str, mode_id: int, hash_key: str) -> Dict[str, Any]:
+        return self.create_scan_order(goods_id=goods_id, mode_id=mode_id, hash_key=hash_key)
+
+    def create_lock_order(self, goods_id: str, mode_id: int, hash_key: str = '', reserve_method: Any = None) -> Dict[str, Any]:
+        payload = {
+            'optionalInfo': {},
+            'purchaseList': [
+                {
+                    'goodsId': int(goods_id),
+                    'goodsItemId': int(mode_id),
+                    'soldType': 1,
+                    'amount': 1,
+                    'num': 1,
+                }
+            ],
+            'hashKey': hash_key,
+            'reserveMethod': reserve_method,
+        }
+        return self._request('POST', '/trade/lockOrderCreate', json=payload)
+
+    def order_detail(self, order_no: str) -> Dict[str, Any]:
+        return self._request('GET', '/trade/order/detail', params={'orderNo': order_no})
+
     def place_clothes(self, order_no: str) -> Dict[str, Any]:
         return self._request('POST', '/device/placeClothes', json={'orderNo': order_no})
+
+    def checkstand(self, order_no: str) -> Dict[str, Any]:
+        return self._request('POST', '/pay/checkstand', json={'orderNo': order_no})
+
+    def underway_preview(self, order_no: str, auto_select_promotion: bool = True) -> Dict[str, Any]:
+        return self._request(
+            'POST',
+            '/trade/underway/preview/V2',
+            json={'autoSelectPromotion': auto_select_promotion, 'orderNo': order_no, 'promotionList': []},
+        )
 
     def create_underway(self, order_no: str) -> Dict[str, Any]:
         payload = {
@@ -159,8 +234,29 @@ class HaierClient:
             }
         return result
 
-    def get_orders(self) -> Dict[str, Any]:
+    def get_underway_orders(self) -> Dict[str, Any]:
         return self._request('POST', '/trade/underway/orderList', json={})
+
+    def get_orders(self) -> Dict[str, Any]:
+        return self.get_underway_orders()
+
+    def list_history_orders(self, page: int = 1, page_size: int = 10) -> Dict[str, Any]:
+        return self._request('POST', '/trade/list', json={'page': page, 'pageSize': page_size})
+
+    def cancel_order(self, order_no: str) -> Dict[str, Any]:
+        result = self._request('POST', '/trade/cancel', json={'orderNo': order_no})
+        if not result.get('ok'):
+            return result
+        if result.get('data') is not True:
+            return {
+                'ok': False,
+                'error_type': 'business',
+                'msg': '云端未确认订单已取消',
+                'code': result.get('code'),
+                'data': result.get('data'),
+                'raw': result.get('raw'),
+            }
+        return result
 
     def finish_order(self, order_no: str) -> Dict[str, Any]:
         result = self._request('POST', '/trade/finishByOrder', json={'orderNo': order_no})

@@ -2,92 +2,183 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>海乐生活控制台 V5.0</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>海乐洗衣助手</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="page">
-        <div class="card">
-            <h1>🚀 海乐生活控制台 V5.0</h1>
-            <p class="subtitle">后端托管流程状态 · 严格错误判定 · 更清晰的调试与订单管理</p>
-
-            <div class="security-strip {{ 'warn' if not ssl_verify else 'ok' }}">
-                {% if not ssl_verify %}
-                当前运行在 <strong>不安全模式</strong>（SSL_VERIFY=false），仅建议在可信环境下使用。
-                {% else %}
-                当前运行在 <strong>证书校验模式</strong>。
-                {% endif %}
-                {% if allow_remote %}
-                服务已允许远程访问。
-                {% else %}
-                服务仅监听本机地址。
-                {% endif %}
+    <div class="app-shell">
+        <header class="topbar">
+            <div>
+                <div class="eyebrow">Haier Laundry WebView</div>
+                <h1 id="pageTitle">洗衣</h1>
             </div>
+            <div id="topStatus" class="status-pill pending">未校验</div>
+        </header>
 
-            <div class="field-block">
-                <label>服务端 Token</label>
-                <div id="tokenStatusCard" class="info-card">
-                    <div id="tokenStatusText" class="info-title">Token 来源：服务器配置</div>
-                    <div id="tokenStatusHint" class="info-hint">页面加载后会自动检查 .env 中的 HAILE_TOKEN。</div>
+        <main class="main-content">
+            <section id="washTab" class="tab-panel active">
+                <div class="panel-header">
+                    <div>
+                        <h2>洗衣</h2>
+                        <p>浏览洗衣房和扫码机组，发起下单或支付流程。</p>
+                    </div>
+                    <button id="refreshWashBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
-            </div>
+                <div id="washView" class="stack"></div>
+            </section>
 
-            <div class="row gap">
-                <div class="col-2">
-                    <label for="machine">选择机器</label>
-                    <select id="machine"></select>
+            <section id="reservationTab" class="tab-panel">
+                <div class="panel-header">
+                    <div>
+                        <h2>预约</h2>
+                        <p>创建单次或每周预约，并查看当前保单状态。</p>
+                    </div>
+                    <button id="refreshReservationsBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
-                <div class="col-1 action-col">
-                    <button id="fetchModesBtn" class="btn btn-blue">🔄 提取模式</button>
+
+                <div class="panel-card">
+                    <h3>新建预约</h3>
+                    <form id="reservationForm" class="form-grid">
+                        <label>
+                            设备来源
+                            <select id="reservationSource">
+                                <option value="scan">扫码机组</option>
+                                <option value="room">洗衣房机器</option>
+                            </select>
+                        </label>
+
+                        <label id="reservationScanWrap">
+                            扫码机组
+                            <select id="reservationScanMachine"></select>
+                        </label>
+
+                        <label id="reservationRoomWrap" class="hidden">
+                            洗衣房
+                            <select id="reservationRoom"></select>
+                        </label>
+
+                        <label id="reservationMachineWrap" class="hidden">
+                            洗衣机
+                            <select id="reservationMachine"></select>
+                        </label>
+
+                        <label>
+                            模式
+                            <select id="reservationMode"></select>
+                        </label>
+
+                        <label>
+                            预约类型
+                            <select id="reservationScheduleType">
+                                <option value="once">单次</option>
+                                <option value="weekly">每周固定时间</option>
+                            </select>
+                        </label>
+
+                        <label id="reservationTargetWrap">
+                            目标时间
+                            <input type="datetime-local" id="reservationTargetTime">
+                        </label>
+
+                        <label id="reservationWeekdayWrap" class="hidden">
+                            每周星期
+                            <select id="reservationWeekday">
+                                <option value="0">周一</option>
+                                <option value="1">周二</option>
+                                <option value="2">周三</option>
+                                <option value="3">周四</option>
+                                <option value="4">周五</option>
+                                <option value="5">周六</option>
+                                <option value="6">周日</option>
+                            </select>
+                        </label>
+
+                        <label id="reservationWeeklyTimeWrap" class="hidden">
+                            每周时间
+                            <input type="time" id="reservationWeeklyTime">
+                        </label>
+
+                        <label>
+                            提前建单分钟数
+                            <input type="number" id="reservationLeadMinutes" min="1" step="1">
+                        </label>
+
+                        <label>
+                            标题
+                            <input type="text" id="reservationTitle" placeholder="不填则自动生成">
+                        </label>
+
+                        <button type="submit" class="btn btn-primary full-width">创建预约任务</button>
+                    </form>
                 </div>
-            </div>
 
-            <div class="field-block">
-                <label for="mode">选择洗涤模式</label>
-                <select id="mode">
-                    <option value="">等待提取...</option>
-                </select>
-            </div>
+                <div id="reservationList" class="stack"></div>
+            </section>
 
-            <div class="status-card">
-                <div id="stepStatus" class="status-title">当前状态：待机</div>
-                <div id="stepHint" class="status-hint">请先确认服务端 Token 可用，再选择机器并提取模式。</div>
-            </div>
+            <section id="orderTab" class="tab-panel">
+                <div class="panel-header">
+                    <div>
+                        <h2>订单</h2>
+                        <p>按页加载历史订单，并可查看详情或结束订单。</p>
+                    </div>
+                    <button id="refreshOrdersBtn" class="btn btn-light" type="button">刷新</button>
+                </div>
+                <div id="ordersList" class="stack"></div>
+                <div id="ordersSentinel" class="sentinel"></div>
+                <button id="loadMoreOrdersBtn" class="btn btn-light full-width hidden" type="button">加载更多订单</button>
+            </section>
 
-            <div class="step-list" id="stepList"></div>
+            <section id="settingsTab" class="tab-panel">
+                <div class="panel-header">
+                    <div>
+                        <h2>设置</h2>
+                        <p>管理 Token、PushPlus 链接和预约默认参数。</p>
+                    </div>
+                    <button id="refreshSettingsBtn" class="btn btn-light" type="button">刷新</button>
+                </div>
 
-            <div class="row gap button-row">
-                <button id="nextBtn" class="btn btn-green">▶ 开始流程</button>
-                <button id="resetBtn" class="btn btn-gray">重置流程</button>
-            </div>
-        </div>
+                <div class="panel-card">
+                    <form id="settingsForm" class="form-grid">
+                        <label>
+                            Token
+                            <input type="password" id="settingsToken" placeholder="留空则回退到 .env 中的 HAILE_TOKEN">
+                        </label>
 
-        <div class="card">
-            <h2>🛡️ 订单监控与强杀</h2>
-            <div class="row gap button-row">
-                <button id="fetchOrdersBtn" class="btn btn-orange">🔍 刷新进行中订单</button>
-                <button id="killBtn" class="btn btn-red">⏹ 强杀选中订单</button>
-            </div>
-            <select id="orderCombo" class="order-select">
-                <option value="">暂无订单...</option>
-            </select>
-            <div id="orderMeta" class="order-meta">订单列表会按最近更新时间排序显示。</div>
-        </div>
+                        <label>
+                            PushPlus 链接
+                            <input type="url" id="settingsPushplusUrl" placeholder="后续用于推送运行状态">
+                        </label>
 
-        <div class="card">
-            <div class="log-head">
-                <h2>📘 用户日志</h2>
-                <button id="toggleDebugBtn" class="btn btn-outline small">显示调试日志</button>
-            </div>
-            <div id="logBox" class="log-box">准备就绪...</div>
-            <div id="debugWrap" class="debug-wrap hidden">
-                <h3>🧪 调试日志</h3>
-                <pre id="debugBox" class="debug-box">暂无调试信息</pre>
-            </div>
-        </div>
+                        <label>
+                            默认提前建单分钟数
+                            <input type="number" id="settingsLeadMinutes" min="1" step="1">
+                        </label>
+
+                        <button type="submit" class="btn btn-primary full-width">保存设置</button>
+                    </form>
+                </div>
+
+                <div id="settingsInfo" class="stack"></div>
+            </section>
+        </main>
+
+        <nav class="tabbar">
+            <button class="tabbar-btn active" data-tab="washTab" type="button">洗衣</button>
+            <button class="tabbar-btn" data-tab="reservationTab" type="button">预约</button>
+            <button class="tabbar-btn" data-tab="orderTab" type="button">订单</button>
+            <button class="tabbar-btn" data-tab="settingsTab" type="button">设置</button>
+        </nav>
     </div>
 
+    <div id="toast" class="toast"></div>
+
+    <script>
+        window.__APP_BOOTSTRAP__ = {
+            allowRemote: {{ 'true' if allow_remote else 'false' }},
+            sslVerify: {{ 'true' if ssl_verify else 'false' }}
+        };
+    </script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

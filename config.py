@@ -5,6 +5,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 MACHINES_FILE = BASE_DIR / 'machines.json'
 ENV_FILE = BASE_DIR / '.env'
+DATABASE_FILE = BASE_DIR / 'haile_server.db'
 ORIGINAL_ENV_KEYS = set(os.environ)
 ENV_FILE_KEYS: set[str] = set()
 
@@ -54,6 +55,10 @@ HOST = '0.0.0.0' if ALLOW_REMOTE else '127.0.0.1'
 PORT = int(os.getenv('PORT', '5000'))
 SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'replace-me-in-production')
 PROCESS_TTL_SECONDS = int(os.getenv('PROCESS_TTL_SECONDS', '3600'))
+DEFAULT_LEAD_MINUTES = int(os.getenv('DEFAULT_LEAD_MINUTES', '60'))
+SCHEDULER_INTERVAL_SECONDS = int(os.getenv('SCHEDULER_INTERVAL_SECONDS', '30'))
+DEFAULT_LNG = float(os.getenv('DEFAULT_LNG', '113.999622'))
+DEFAULT_LAT = float(os.getenv('DEFAULT_LAT', '22.596488'))
 BASE_URL = 'https://yshz-user.haier-ioc.com'
 
 if not SSL_VERIFY:
@@ -70,3 +75,8 @@ def load_machines():
 def get_haile_token() -> str:
     load_env_file()
     return os.getenv('HAILE_TOKEN', '').strip()
+
+
+def get_pushplus_url() -> str:
+    load_env_file()
+    return os.getenv('PUSHPLUS_URL', '').strip()

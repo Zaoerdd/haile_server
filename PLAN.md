@@ -1,0 +1,94 @@
+# 基于 `haier_api_package` 的移动端四标签改版与预约系统开发计划
+
+## Summary
+- 把当前单页“控制台”重构为适配安卓 WebView 的移动端应用壳，底部常驻 4 个标签：`洗衣 / 预约 / 订单 / 设置`。
+- 接口包对以下能力已基本足够：门店/楼层/设备浏览、扫码建单、选机建单到 `create order`、订单详情、进行中订单、历史订单分页、取消订单、结束订单、支付链路样例。
+- 接口包当前不完整/需谨慎的地方：
+  - `appointment/goodsExist` 只是设备可用性校验，不是“预约任务”的后端任务系统；预约调度必须由我们自己实现。
+  - 抓包样例里的 `enableReserve=false`，说明官方“预约”能力至少在当前样本里不是现成可直接复用的业务流。
+  - `state=50` 同时出现“待验证/待支付”，后续状态判断必须组合 `state + stateDesc + pageCode + buttonSwitch`，不能只看数字。
+  - `lockOrderCreate` 后续完整支付链路在接口包里没有形成明确的“选机路径样例闭环”，所以线上选机下单本期只做到“创建订单成功”，后续支付步骤显式标成 `TODO`。
+  - PushPlus 相关能力不在接口包里，需要我们自建设置、推送封装和运行日志。
+- 架构默认值已锁定：
+  - 设置持久化走服务端。
+  - 预约任务存储和调度使用 `SQLite + 调度器`。
+  - 洗衣页的数据来源采用“`API 洗衣房/设备` + `machines.json 虚拟扫码机组`”混合模式。
+  - 预约窗口内手动结束订单后，任务进入“暂停自动重建”状态，不立即补单。
+
+## Implementation Changes
+- **应用壳与移动端导航**
+  - 新建移动端单页壳，底部固定 TabBar，支持安全区、单手操作、底部留白和 WebView 高度适配。
+  - 洗衣页默认展示两个入口分组：`洗衣房` 与 `扫码机组`。
+  - 预约页展示任务列表、创建任务入口、运行状态、最近一次执行结果。
+  - 订单页展示订单瀑布流/卡片流，支持下滑加载更多。
+  - 设置页承载 Token、PushPlus 链接、默认提前建单分钟数、调度运行状态。
+- **后端接口扩展**
+  - 扩展 Haier API 客户端，补齐 `position/usePositionList`、`position/positionDetail`、`position/deviceDetailPage`、`trade/lockOrderCreate`、`trade/order/detail`、`trade/list`、`trade/cancel`、`pay/checkstand`、`trade/underway/preview/V2`、`goods/verify` 等现有包内已覆盖接口。
+  - 保留现有“虚拟扫码下单”流程作为完整下单/支付链路；新增“线上选机下单”流程仅做到 `lockOrderCreate -> order/detail`，其后步骤返回 `TODO` 状态和明确提示。
+  - 对外新增 Web API：
+    - `GET /api/laundry/sections`：返回洗衣房分组和本地扫码机组。
+    - `GET /api/laundry/rooms`、`GET /api/laundry/rooms/{positionId}/machines`、`GET /api/laundry/machines/{goodsId}`。
+    - `POST /api/orders/create-by-scan`、`POST /api/orders/create-by-lock`、`GET /api/orders/{orderNo}`、`POST /api/orders/{orderNo}/cancel`、`POST /api/orders/{orderNo}/finish`。
+    - `POST /api/orders/history`：分页历史订单。
+    - `GET /api/settings`、`PUT /api/settings`。
+    - `GET /api/reservations`、`POST /api/reservations`、`POST /api/reservations/{id}/pause`、`POST /api/reservations/{id}/resume`、`DELETE /api/reservations/{id}`。
+  - 设置读取优先级改为：`SQLite 持久化设置 > .env 启动默认值`；调度器和前端都只读服务端设置。
+- **数据存储与调度**
+  - 新增 SQLite 持久化，至少包含：
+    - `app_settings`：`token`、`pushplus_url`、`default_lead_minutes`、更新时间。
+    - `reservation_tasks`：机器来源类型、机器标识、目标时间、单次/每周规则、提前分钟数、状态、当前关联 `orderNo`、保单窗口结束时间、最近检查时间、最近错误。
+    - `reservation_events`：建单、续单、过期、手动结束、暂停、恢复、支付完成等事件日志。
+  - 新增后台调度器，固定轮询周期默认 `30s`。
+  - 预约规则固定为：
+    - `start_at = target_time - lead_minutes`
+    - `hold_until = target_time + 10min`
+    - 进入窗口后若没有处于“待支付/待验证”的活跃订单，则创建新订单。
+    - 订单进入 `401/411` 或 detail 判断为不可支付/已失效时自动补建。
+    - 用户支付成功后任务本次执行自动完成；单次任务结束，周任务等待下次触发。
+    - 用户手动结束订单后，任务切到“暂停自动重建”，需手动恢复或新建。
+    - 同一台机器同一时间窗口只允许一个活跃预约任务，后建任务直接拒绝。
+- **四个页面的具体行为**
+  - 洗衣：
+    - `洗衣房` 分组走 API：房间列表 -> 机器列表 -> 机器详情/SKU -> 线上选机建单或进入虚拟扫码替代路径。
+    - `扫码机组` 分组走本地 `machines.json`：直接映射二维码编号，复用现有完整扫码下单与支付流程。
+    - 线上选机路径在创建订单成功后展示订单号、当前状态、下一步 `TODO`，不继续支付。
+  - 预约：
+    - 创建任务时必须选择机器、时间、单次/每周、提前建单分钟数。
+    - 机器选择复用洗衣页的数据源；本期只允许对“可创建待支付订单”的机器建预约任务。
+    - 列表页展示任务状态：未开始、保单中、暂停、已完成、失败。
+  - 订单：
+    - 默认读取当前用户历史订单分页，首屏一页，滚动触底加载更多。
+    - 卡片展示 `orderNo / 设备名 / 模式 / 金额 / 创建时间 / 状态 / 可操作按钮`。
+    - 详情展开时补拉 `trade/order/detail`，并根据 `buttonSwitch` 决定是否显示“结束订单”。
+  - 设置：
+    - Token 输入框改为可编辑并持久化到服务端设置。
+    - PushPlus 输入框只做保存和连通性校验占位；后续所有预约执行、失败、暂停、支付完成都通过统一推送服务发通知。
+    - 页面显示调度器状态、最近一次轮询时间、最近一次错误摘要。
+
+## Test Plan
+- **接口包适配验证**
+  - 门店列表、楼层、设备分页、设备详情、扫码详情、历史订单分页、订单详情、取消/结束在测试账号下均能拿到规范化响应。
+  - `lockOrderCreate` 成功后能拿到 `orderNo`，并能通过 `order/detail` 读取 `50` 状态；页面显示 `TODO` 而不是继续走错误支付链路。
+- **移动端 UI 验证**
+  - 安卓 WebView 下底部菜单固定可点，切换标签不抖动，键盘弹出不遮挡设置表单。
+  - 洗衣房列表、机器列表、订单列表都以手机单列卡片为主，滚动与返回层级清晰。
+- **预约任务验证**
+  - 单次预约在 `target_time - lead_minutes` 进入保单窗口并创建待支付订单。
+  - 窗口内订单若变为 `401/411`，调度器会自动补建新订单。
+  - 手动结束订单后任务变为“暂停自动重建”，不会自动续单。
+  - 支付成功后当前执行结束；周任务保留下次触发时间，单次任务标记完成。
+  - 同机同窗口重复建任务会被拒绝。
+- **设置与持久化验证**
+  - 设置页修改 Token/PushPlus 后，刷新页面与重启服务后仍生效。
+  - `.env` 中有默认值、SQLite 中无值时可以正常回退；一旦设置页保存过值，以 SQLite 为准。
+- **订单页验证**
+  - `trade/list` 分页滚动加载正常，重复页不重入。
+  - 订单详情状态与列表摘要冲突时，以 `order/detail` 为准。
+  - “结束订单”只在接口允许的状态下展示。
+
+## Assumptions
+- 当前系统是单用户、单实例服务；设置、预约任务、推送目标都是服务级别，不做多账号隔离。
+- 时区按服务所在机器本地时区执行，默认以当前环境的 `Asia/Shanghai` 为准。
+- 本期不实现官方预约接口，因为接口包中没有完整的“创建/取消预约任务”服务端闭环；预约能力由我们本地调度系统实现。
+- 本期先不实现 PushPlus 发送内容模板细化，只预留统一推送服务和触发点。
+- 如果后续补齐“线上选机下单”的支付链路抓包或字段，再把 `TODO` 段替换为完整流程即可，不影响当前架构。
