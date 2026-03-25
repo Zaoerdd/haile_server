@@ -20,6 +20,21 @@ PENDING_ORDER_STATES = {50}
 CLOSED_ORDER_STATES = {401, 411}
 RUNNING_ORDER_STATES = {500}
 COMPLETED_ORDER_STATES = {1000}
+MACHINE_IDENTIFIER_KEYS = {
+    'goodsId',
+    'goodsCode',
+    'goodsNo',
+    'goodsSn',
+    'deviceId',
+    'deviceCode',
+    'deviceNo',
+    'deviceSn',
+    'qrCode',
+    'qrNo',
+    'n',
+    'sn',
+    'code',
+}
 
 
 def now_local() -> datetime:
@@ -423,28 +438,97 @@ class ReservationService:
         params.append(task_id)
         database.execute(f"UPDATE reservation_tasks SET {', '.join(fields)} WHERE id = ?", tuple(params))
 
-    def _create_pending_order(self, task: ReservationTask, token: str) -> tuple[bool, str, Dict[str, Any] | None]:
+    def _collect_keyed_values(self, obj: Any, keys: set[str]) -> set[str]:
+        found: set[str] = set()
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in keys and value not in (None, ''):
+                    found.add(str(value).strip())
+                found.update(self._collect_keyed_values(value, keys))
+        elif isinstance(obj, list):
+            for item in obj:
+                found.update(self._collect_keyed_values(item, keys))
+        return {item for item in found if item}
+
+    def _build_machine_identifiers(self, qr_code: str, scan_data: Dict[str, Any]) -> set[str]:
+        identifiers = {str(qr_code).strip()}
+        identifiers.update(self._collect_keyed_values(scan_data, MACHINE_IDENTIFIER_KEYS))
+        return {item for item in identifiers if item}
+
+    def _order_matches_machine(self, order: Dict[str, Any], machine_identifiers: set[str]) -> bool:
+        order_identifiers = self._collect_keyed_values(order, MACHINE_IDENTIFIER_KEYS)
+        if machine_identifiers & order_identifiers:
+            return True
+
+        order_blob = json.dumps(order, ensure_ascii=False, sort_keys=True)
+        return any(identifier and len(identifier) >= 6 and identifier in order_blob for identifier in machine_identifiers)
+
+    def _find_existing_pending_order(
+        self,
+        task: ReservationTask,
+        client: HaierClient,
+        qr_code: str,
+        scan_data: Dict[str, Any],
+    ) -> tuple[str, Dict[str, Any]] | None:
+        orders_res = client.get_underway_orders()
+        if not orders_res.get('ok'):
+            return None
+
+        machine_identifiers = self._build_machine_identifiers(qr_code, scan_data)
+        candidates: list[tuple[str, str, Dict[str, Any]]] = []
+        for order in orders_res.get('data') or []:
+            if not self._order_matches_machine(order, machine_identifiers):
+                continue
+            order_no = str(order.get('orderNo') or '').strip()
+            if not order_no:
+                continue
+            detail_res = client.order_detail(order_no)
+            if not detail_res.get('ok'):
+                continue
+            detail = detail_res.get('data') or {}
+            if self._classify_order_detail(detail) != 'pending':
+                continue
+            sort_key = str(order.get('updateTime') or order.get('gmtModified') or order.get('createTime') or '')
+            candidates.append((sort_key, order_no, detail))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, order_no, detail = candidates[0]
+        return order_no, detail
+
+    def _create_pending_order(self, task: ReservationTask, token: str) -> tuple[bool, str, Dict[str, Any] | None, str]:
         if not task.qr_code:
-            return False, '缺少二维码编号，无法创建预约订单。', None
+            return False, '缺少二维码编号，无法创建预约订单。', None, 'failed'
         client = HaierClient(token)
         scan_res = client.scan_goods(task.qr_code)
         if not scan_res.get('ok'):
-            return False, scan_res.get('msg') or '扫描预约设备失败。', scan_res.get('raw')
+            return False, scan_res.get('msg') or '扫描预约设备失败。', scan_res.get('raw'), 'failed'
         scan_data = scan_res.get('data') or {}
         goods_id = scan_data.get('goodsId')
         if not goods_id:
-            return False, '扫码结果缺少 goodsId。', scan_res.get('raw')
+            return False, '扫码结果缺少 goodsId。', scan_res.get('raw'), 'failed'
+        existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data)
+        if existing_order:
+            order_no, detail = existing_order
+            return True, order_no, detail, 'adopted'
         create_res = client.create_scan_order(goods_id=str(goods_id), mode_id=task.mode_id, hash_key=str(scan_data.get('activityHashKey') or ''))
         if not create_res.get('ok'):
-            return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw')
+            if create_res.get('error_type') == 'business':
+                existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data)
+                if existing_order:
+                    order_no, detail = existing_order
+                    return True, order_no, detail, 'adopted'
+            return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), 'failed'
         order_data = create_res.get('data') or {}
         order_no = str(order_data.get('orderNo') or '').strip()
         if not order_no:
-            return False, '创建预约订单成功，但未返回 orderNo。', create_res.get('raw')
+            return False, '创建预约订单成功，但未返回 orderNo。', create_res.get('raw'), 'failed'
         detail_res = client.order_detail(order_no)
         if not detail_res.get('ok'):
-            return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw')
-        return True, order_no, detail_res.get('data') or {}
+            return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
+        return True, order_no, detail_res.get('data') or {}, 'created'
 
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
         state = int(detail.get('state') or 0)
@@ -483,10 +567,11 @@ class ReservationService:
         settings = settings_store.get_effective_settings()
         token = settings.token
         if not token:
-            return {'processed': 0, 'created': 0, 'recreated': 0, 'completed': 0}
+            return {'processed': 0, 'created': 0, 'adopted': 0, 'recreated': 0, 'completed': 0}
 
         now = now_local()
         created_count = 0
+        adopted_count = 0
         recreated_count = 0
         completed_count = 0
         rows = database.fetch_all(
@@ -514,13 +599,19 @@ class ReservationService:
                 continue
 
             if not task.active_order_no:
-                ok, result, detail = self._create_pending_order(task, token)
+                ok, result, detail, source = self._create_pending_order(task, token)
                 if not ok:
                     self._update_task(task.id, last_error=str(result), last_checked_at=to_iso(now))
                     self._record_event(task.id, 'order_create_failed', str(result), {'detail': detail})
                     continue
-                created_count += 1
                 order_no = str(result)
+                if source == 'adopted':
+                    adopted_count += 1
+                    self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                    self._record_event(task.id, 'existing_order_adopted', '\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002', {'orderNo': order_no})
+                    self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
+                    continue
+                created_count += 1
                 self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
                 self._record_event(task.id, 'order_created', '预约订单已创建并进入保单窗口。', {'orderNo': order_no})
                 self._notify('预约订单已创建', f'{task.title}\n订单号：{order_no}')
@@ -553,13 +644,25 @@ class ReservationService:
                 continue
 
             if classification == 'closed':
-                ok, result, recreate_detail = self._create_pending_order(task, token)
+                previous_order_no = task.active_order_no
+                ok, result, recreate_detail, source = self._create_pending_order(task, token)
                 if not ok:
                     self._update_task(task.id, active_order_no=None, status='scheduled', last_error=str(result), last_checked_at=to_iso(now))
                     self._record_event(task.id, 'order_closed', '原订单已失效，等待下一轮补建。', {'orderNo': task.active_order_no})
                     continue
-                recreated_count += 1
                 order_no = str(result)
+                if source == 'adopted':
+                    adopted_count += 1
+                    self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
+                    self._record_event(
+                        task.id,
+                        'existing_order_adopted',
+                        '\u539f\u8ba2\u5355\u5931\u6548\u540e\uff0c\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u65b0\u7684\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002',
+                        {'orderNo': order_no, 'previousOrderNo': previous_order_no},
+                    )
+                    self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
+                    continue
+                recreated_count += 1
                 self._update_task(task.id, status='holding', active_order_no=order_no, last_checked_at=to_iso(now), last_run_at=to_iso(now), last_error=None)
                 self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建。', {'orderNo': order_no, 'detail': recreate_detail})
                 self._notify('预约订单已补建', f'{task.title}\n新订单号：{order_no}')
@@ -571,6 +674,7 @@ class ReservationService:
         return {
             'processed': len(rows),
             'created': created_count,
+            'adopted': adopted_count,
             'recreated': recreated_count,
             'completed': completed_count,
         }

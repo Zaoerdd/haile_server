@@ -68,6 +68,8 @@ const state = {
         toastTimer: null,
         tokenAlertReason: null,
         dialogResolver: null,
+        reservationRefreshTimer: null,
+        reservationRefreshInFlight: false,
     },
 };
 
@@ -263,6 +265,33 @@ function primeInputs() {
     el.reservationWeeklyTime.value = '08:00';
 }
 
+function getReservationRefreshDelayMs() {
+    const intervalSeconds = Number((state.scheduler || {}).intervalSeconds || 30);
+    if (!Number.isFinite(intervalSeconds) || intervalSeconds < 5) {
+        return 30 * 1000;
+    }
+    return intervalSeconds * 1000;
+}
+
+function clearReservationAutoRefresh() {
+    if (state.ui.reservationRefreshTimer) {
+        window.clearTimeout(state.ui.reservationRefreshTimer);
+        state.ui.reservationRefreshTimer = null;
+    }
+}
+
+function restartReservationAutoRefresh() {
+    clearReservationAutoRefresh();
+    state.ui.reservationRefreshTimer = window.setTimeout(async () => {
+        state.ui.reservationRefreshTimer = null;
+        if (state.activeTab !== 'reservationTab' || state.ui.reservationRefreshInFlight) {
+            restartReservationAutoRefresh();
+            return;
+        }
+        await loadReservations({ silent: true });
+    }, getReservationRefreshDelayMs());
+}
+
 function buildHistoryState() {
     const payload = { tab: state.activeTab };
     if (state.activeTab !== 'washTab') {
@@ -369,6 +398,10 @@ function switchTab(tabId, options = {}) {
 
     if (options.pushHistory !== false) {
         pushHistoryState();
+    }
+
+    if (tabId === 'reservationTab') {
+        loadReservations({ silent: true });
     }
 
     if (tabId === 'orderTab' && isTokenReady() && !state.orders.loading) {
@@ -521,6 +554,7 @@ async function loadConfig() {
         renderWash();
         renderReservations();
         renderOrders();
+        restartReservationAutoRefresh();
     }
 }
 
@@ -541,6 +575,7 @@ async function loadSettings() {
     } finally {
         state.bootstrap.settingsLoading = false;
         renderSettings();
+        restartReservationAutoRefresh();
     }
 }
 
@@ -572,14 +607,27 @@ async function loadLaundrySections({ showToast = false, preserveView = false } =
     }
 }
 
-async function loadReservations() {
+async function loadReservations(options = {}) {
+    const { silent = false, rethrow = false } = options;
+    if (state.ui.reservationRefreshInFlight) {
+        return;
+    }
+
+    state.ui.reservationRefreshInFlight = true;
     try {
         const data = await apiGet('/api/reservations');
         state.reservations.items = data.items || [];
         state.scheduler = data.scheduler || state.scheduler;
+    } catch (error) {
+        handleRequestError(error, '读取预约和调度器状态失败。', silent);
+        if (rethrow) {
+            throw error;
+        }
     } finally {
+        state.ui.reservationRefreshInFlight = false;
         state.bootstrap.reservationsLoading = false;
         renderReservations();
+        restartReservationAutoRefresh();
     }
 }
 
@@ -1124,6 +1172,7 @@ function renderReservations() {
                 <div><span>轮询间隔</span><span>${escapeHtml(stringOrFallback(scheduler.intervalSeconds, '--'))} 秒</span></div>
                 <div><span>最近轮询</span><span>${escapeHtml(formatDateTime(scheduler.lastTickAt))}</span></div>
                 <div><span>最近创建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).created, 0))}</span></div>
+                <div><span>最近接管</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).adopted, 0))}</span></div>
                 <div><span>最近补建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).recreated, 0))}</span></div>
             </div>
             ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
@@ -1237,6 +1286,7 @@ function renderSettings() {
                 <div><span>当前间隔</span><span>${escapeHtml(stringOrFallback(scheduler.intervalSeconds, '--'))} 秒</span></div>
                 <div><span>最近轮询</span><span>${escapeHtml(formatDateTime(scheduler.lastTickAt))}</span></div>
                 <div><span>最近创建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).created, 0))}</span></div>
+                <div><span>最近接管</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).adopted, 0))}</span></div>
                 <div><span>最近补建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).recreated, 0))}</span></div>
             </div>
             ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
