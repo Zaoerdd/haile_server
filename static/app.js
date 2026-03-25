@@ -21,6 +21,8 @@ const DEFAULT_TOKEN_STATUS = {
     message: '当前未配置可用 Token，请前往设置页处理。',
 };
 
+const CLIENT_CACHE_KEY = 'haile-ui-cache-v1';
+
 const state = {
     activeTab: 'washTab',
     tokenStatus: { ...DEFAULT_TOKEN_STATUS },
@@ -77,6 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     initOrderObserver();
     primeInputs();
+    restoreClientCache();
     renderWash();
     renderReservations();
     renderOrders();
@@ -433,12 +436,51 @@ function updateFormAvailability() {
     el.loadMoreOrdersBtn.disabled = disableTokenRequired || !state.orders.hasMore;
 }
 
+function persistClientCache() {
+    try {
+        const payload = {
+            tokenStatus: state.tokenStatus,
+            scheduler: state.scheduler,
+            settings: state.settings,
+        };
+        window.localStorage.setItem(CLIENT_CACHE_KEY, JSON.stringify(payload));
+    } catch (error) {
+        console.warn('persistClientCache failed', error);
+    }
+}
+
+function restoreClientCache() {
+    try {
+        const raw = window.localStorage.getItem(CLIENT_CACHE_KEY);
+        if (!raw) {
+            applyTokenStatus(DEFAULT_TOKEN_STATUS);
+            return;
+        }
+        const payload = JSON.parse(raw);
+        state.scheduler = payload.scheduler || null;
+        state.settings = payload.settings || null;
+        applyTokenStatus(payload.tokenStatus || DEFAULT_TOKEN_STATUS);
+
+        if (state.settings) {
+            el.settingsToken.value = state.settings.token || '';
+            el.settingsPushplusUrl.value = state.settings.pushplusUrl || '';
+            el.settingsLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
+            el.settingsPollInterval.value = state.settings.reservationPollIntervalSeconds || 30;
+            el.reservationLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
+        }
+    } catch (error) {
+        console.warn('restoreClientCache failed', error);
+        applyTokenStatus(DEFAULT_TOKEN_STATUS);
+    }
+}
+
 async function loadConfig() {
     const data = await apiGet('/api/config');
     state.security = data.security || null;
     state.scheduler = data.scheduler || null;
     state.wash.scanMachines = data.scanMachines || [];
     applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
+    persistClientCache();
 }
 
 async function loadSettings() {
@@ -454,6 +496,7 @@ async function loadSettings() {
         el.settingsPollInterval.value = state.settings.reservationPollIntervalSeconds || 30;
         el.reservationLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
     }
+    persistClientCache();
     renderSettings();
 }
 
@@ -489,6 +532,7 @@ async function loadReservations() {
     const data = await apiGet('/api/reservations');
     state.reservations.items = data.items || [];
     state.scheduler = data.scheduler || state.scheduler;
+    persistClientCache();
     renderReservations();
 }
 
@@ -1804,8 +1848,13 @@ async function handleSettingsSubmit(event) {
         state.settings = data.settings || state.settings;
         state.scheduler = data.scheduler || state.scheduler;
         applyTokenStatus(data.tokenStatus || state.tokenStatus, true);
+        persistClientCache();
+        renderWash();
+        renderReservations();
+        renderOrders();
         renderSettings();
         showToastMessage(data.msg || '设置已保存。');
+        await loadReservations();
 
         if (isTokenReady()) {
             await loadLaundrySections({ showToast: false, preserveView: false });
