@@ -177,6 +177,17 @@
     </div>
 
     <div id="toast" class="toast"></div>
+    <div id="appDialog" class="app-dialog hidden" aria-hidden="true">
+        <div class="app-dialog-backdrop"></div>
+        <div class="app-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle">
+            <h3 id="appDialogTitle">提示</h3>
+            <p id="appDialogMessage"></p>
+            <div class="app-dialog-actions">
+                <button id="appDialogCancel" class="btn btn-light hidden" type="button">取消</button>
+                <button id="appDialogConfirm" class="btn btn-primary" type="button">确定</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         window.__APP_BOOTSTRAP__ = {

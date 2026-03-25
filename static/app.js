@@ -67,6 +67,7 @@ const state = {
     ui: {
         toastTimer: null,
         tokenAlertReason: null,
+        dialogResolver: null,
     },
 };
 
@@ -116,6 +117,11 @@ function bindElements() {
     el.tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
     el.tabButtons = Array.from(document.querySelectorAll('.tabbar-btn'));
     el.toast = document.getElementById('toast');
+    el.appDialog = document.getElementById('appDialog');
+    el.appDialogTitle = document.getElementById('appDialogTitle');
+    el.appDialogMessage = document.getElementById('appDialogMessage');
+    el.appDialogCancel = document.getElementById('appDialogCancel');
+    el.appDialogConfirm = document.getElementById('appDialogConfirm');
 
     el.washView = document.getElementById('washView');
     el.refreshWashBtn = document.getElementById('refreshWashBtn');
@@ -194,6 +200,13 @@ function bindEvents() {
         if (!state.orders.loading && state.orders.hasMore && ensureTokenReady()) {
             await loadOrders(false);
         }
+    });
+
+    el.appDialogConfirm.addEventListener('click', () => {
+        closeAppDialog(true);
+    });
+    el.appDialogCancel.addEventListener('click', () => {
+        closeAppDialog(false);
     });
 
     el.reservationSource.addEventListener('change', async () => {
@@ -434,7 +447,7 @@ function notifyTokenProblem(force = false) {
         return;
     }
     state.ui.tokenAlertReason = reason;
-    window.alert(getTokenAlertMessage());
+    showAlertDialog(getTokenAlertMessage());
 }
 
 function ensureTokenReady() {
@@ -454,6 +467,43 @@ function updateFormAvailability() {
     el.refreshWashBtn.disabled = disableTokenRequired;
     el.refreshOrdersBtn.disabled = disableTokenRequired;
     el.loadMoreOrdersBtn.disabled = disableTokenRequired || !state.orders.hasMore;
+}
+
+function openAppDialog({ title = '提示', message = '', confirmText = '确定', cancelText = '取消', showCancel = false }) {
+    if (state.ui.dialogResolver) {
+        state.ui.dialogResolver(false);
+        state.ui.dialogResolver = null;
+    }
+
+    el.appDialogTitle.textContent = title;
+    el.appDialogMessage.textContent = message;
+    el.appDialogConfirm.textContent = confirmText;
+    el.appDialogCancel.textContent = cancelText;
+    el.appDialogCancel.classList.toggle('hidden', !showCancel);
+    el.appDialog.classList.remove('hidden');
+    el.appDialog.setAttribute('aria-hidden', 'false');
+
+    return new Promise(resolve => {
+        state.ui.dialogResolver = resolve;
+    });
+}
+
+function closeAppDialog(result) {
+    const resolver = state.ui.dialogResolver;
+    state.ui.dialogResolver = null;
+    el.appDialog.classList.add('hidden');
+    el.appDialog.setAttribute('aria-hidden', 'true');
+    if (resolver) {
+        resolver(result);
+    }
+}
+
+function showAlertDialog(message, title = '提示') {
+    return openAppDialog({ title, message, confirmText: '确定', showCancel: false });
+}
+
+function showConfirmDialog(message, title = '请确认') {
+    return openAppDialog({ title, message, confirmText: '确定', cancelText: '取消', showCancel: true });
 }
 
 async function loadConfig() {
@@ -1553,7 +1603,7 @@ async function openScanMachine(qrCode, options = {}) {
 async function openMachineScan() {
     const machine = state.wash.machineDetail;
     if (!machine || !machine.supportsVirtualScan || !machine.scanCode) {
-        window.alert('当前设备不支持虚拟扫码流程。');
+        await showAlertDialog('当前设备不支持虚拟扫码流程。');
         return;
     }
     await openScanMachine(machine.scanCode, { label: machine.name });
@@ -1582,7 +1632,7 @@ async function createLockOrder() {
     const machine = state.wash.machineDetail;
     const modeId = getSelectedValue('washModeSelect');
     if (!machine || !modeId) {
-        window.alert('请先选择模式。');
+        await showAlertDialog('请先选择模式。');
         return;
     }
 
@@ -1608,7 +1658,7 @@ async function startScanProcess() {
     const qrCode = scanMachine ? scanMachine.qrCode : '';
     const modeId = getSelectedValue('scanModeSelect');
     if (!qrCode || !modeId) {
-        window.alert('请先选择模式。');
+        await showAlertDialog('请先选择模式。');
         return;
     }
 
@@ -1621,7 +1671,7 @@ async function startScanProcess() {
 async function advanceProcess() {
     const process = state.wash.process;
     if (!process || !process.processId) {
-        window.alert('当前没有可继续的流程。');
+        await showAlertDialog('当前没有可继续的流程。');
         return;
     }
 
@@ -1643,7 +1693,7 @@ async function resetProcess() {
         pushHistoryState();
         return;
     }
-    if (!window.confirm('确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。')) {
+    if (!(await showConfirmDialog('确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。'))) {
         return;
     }
     const data = await apiPost('/api/process/reset', {
@@ -1668,7 +1718,7 @@ async function handleReservationSubmit(event) {
     const modeId = el.reservationMode.value;
     const mode = (state.reservations.modeOptions || []).find(item => String(item.id) === String(modeId));
     if (!modeId || !mode) {
-        window.alert('请先选择预约模式。');
+        await showAlertDialog('请先选择预约模式。');
         return;
     }
 
@@ -1692,7 +1742,7 @@ async function handleReservationSubmit(event) {
         const qrCode = el.reservationScanMachine.value;
         const machine = (state.wash.scanMachines || []).find(item => item.qrCode === qrCode);
         if (!qrCode || !machine) {
-            window.alert('请先选择扫码机组。');
+            await showAlertDialog('请先选择扫码机组。');
             return;
         }
         payload.machineId = qrCode;
@@ -1704,7 +1754,7 @@ async function handleReservationSubmit(event) {
         const room = (state.wash.rooms || []).find(item => item.id === roomId);
         const machine = (state.reservations.roomMachines || []).find(item => item.goodsId === goodsId);
         if (!room || !machine) {
-            window.alert('请先选择洗衣房和洗衣机。');
+            await showAlertDialog('请先选择洗衣房和洗衣机。');
             return;
         }
         payload.machineId = machine.goodsId;
@@ -1726,26 +1776,31 @@ async function handleReservationClick(event) {
         return;
     }
 
+    const action = button.dataset.action;
     const taskId = button.dataset.taskId;
     if (!taskId) {
         return;
     }
 
-    if (button.dataset.action === 'pause-reservation') {
+    if (action === 'pause-reservation') {
         const data = await apiPost(`/api/reservations/${taskId}/pause`, {});
         showToastMessage(data.msg || '预约任务已暂停。');
         await loadReservations();
         return;
     }
 
-    if (button.dataset.action === 'resume-reservation') {
+    if (action === 'resume-reservation') {
         const data = await apiPost(`/api/reservations/${taskId}/resume`, {});
         showToastMessage(data.msg || '预约任务已恢复。');
         await loadReservations();
         return;
     }
 
-    if (!window.confirm('确定删除这个预约任务吗？')) {
+    if (action !== 'delete-reservation') {
+        return;
+    }
+
+    if (!(await showConfirmDialog('确定删除这个预约任务吗？'))) {
         return;
     }
     const data = await apiDelete(`/api/reservations/${taskId}`);
@@ -1774,7 +1829,7 @@ async function handleOrderClick(event) {
         return;
     }
     if (action === 'abandon-process') {
-        if (!window.confirm('确定放弃这个待继续流程吗？')) {
+        if (!(await showConfirmDialog('确定放弃这个待继续流程吗？'))) {
             return;
         }
         const data = await apiPost('/api/process/reset', {
@@ -1807,7 +1862,7 @@ async function handleOrderClick(event) {
     }
 
     if (action === 'finish-order') {
-        if (!window.confirm(`确定结束订单 ${orderNo} 吗？`)) {
+        if (!(await showConfirmDialog(`确定结束订单 ${orderNo} 吗？`))) {
             return;
         }
         const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/finish`, {});
@@ -1817,7 +1872,7 @@ async function handleOrderClick(event) {
         return;
     }
 
-    if (!window.confirm(`确定取消订单 ${orderNo} 吗？`)) {
+    if (!(await showConfirmDialog(`确定取消订单 ${orderNo} 吗？`))) {
         return;
     }
     const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});

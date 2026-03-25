@@ -540,6 +540,59 @@ label > select {
     transform: translate(-50%, 0);
 }
 
+.app-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+}
+
+.app-dialog.hidden {
+    display: none !important;
+}
+
+.app-dialog-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(20, 14, 10, 0.42);
+    backdrop-filter: blur(6px);
+}
+
+.app-dialog-panel {
+    position: relative;
+    width: min(100%, 420px);
+    padding: 22px 18px 18px;
+    border-radius: 24px;
+    background: var(--panel-strong);
+    box-shadow: 0 26px 60px rgba(37, 27, 19, 0.32);
+    border: 1px solid rgba(255, 255, 255, 0.75);
+}
+
+.app-dialog-panel h3 {
+    margin: 0 0 10px;
+    font-size: 18px;
+}
+
+.app-dialog-panel p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
+.app-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.app-dialog-actions .btn {
+    min-width: 92px;
+}
+
 .sentinel {
     height: 1px;
 }

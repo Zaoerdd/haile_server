@@ -4,14 +4,17 @@ import android.annotation.SuppressLint;
 import android.net.Uri;
 import android.os.Bundle;
 import android.webkit.HttpAuthHandler;
+import android.webkit.JsResult;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
@@ -56,6 +59,30 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setJavaScriptEnabled(true);
         webSettings.setDomStorageEnabled(true);
         webSettings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        myWebView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setCancelable(false)
+                        .setPositiveButton(android.R.string.ok, (dialog, which) -> result.confirm())
+                        .setOnCancelListener(dialog -> result.cancel())
+                        .show();
+                return true;
+            }
+
+            @Override
+            public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setCancelable(true)
+                        .setPositiveButton(android.R.string.ok, (dialog, which) -> result.confirm())
+                        .setNegativeButton(android.R.string.cancel, (dialog, which) -> result.cancel())
+                        .setOnCancelListener(dialog -> result.cancel())
+                        .show();
+                return true;
+            }
+        });
 
         myWebView.setWebViewClient(new WebViewClient() {
             @Override
