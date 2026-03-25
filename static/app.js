@@ -1165,7 +1165,7 @@ function renderSettings() {
             <div class="card-title">
                 <div>
                     <h3>设置来源</h3>
-                    <p>数据库中的设置优先级高于 `.env` 默认值。</p>
+                    <p>数据库中的设置优先级高于 <code>.env</code> 默认值。</p>
                 </div>
             </div>
             <div class="detail-grid">
