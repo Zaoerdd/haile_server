@@ -10,6 +10,7 @@ cp .env.example .env
 按需修改 `.env`，至少建议改掉：
 
 - `FLASK_SECRET_KEY`
+- `HAILE_TOKEN`
 - `SSL_VERIFY`
 - `PORT`
 
@@ -44,3 +45,4 @@ http://服务器IP:5000
 - 容器内默认使用 Gunicorn 监听 `0.0.0.0:5000`
 - `machines.json` 通过 volume 只读挂载，便于后续修改机器配置
 - 如果你的环境需要严格校验证书，把 `.env` 中的 `SSL_VERIFY` 改成 `true`
+- Web 页面会从 `.env` 自动读取 `HAILE_TOKEN`，不再要求用户手动输入 token

@@ -53,6 +53,33 @@ input, select {
     background: #fff;
 }
 .field-block { margin-bottom: 14px; }
+.info-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    background: #fafcfd;
+}
+.info-card.ok {
+    border-color: #b7e1c0;
+    background: #eef9f0;
+}
+.info-card.warn {
+    border-color: #f0b5b3;
+    background: #fff1f0;
+}
+.info-card.pending {
+    border-color: #d7e8ff;
+    background: #f5f9ff;
+}
+.info-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+.info-hint {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
 .row {
     display: flex;
     align-items: end;

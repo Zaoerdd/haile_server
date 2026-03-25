@@ -6,6 +6,14 @@ const STEPS = [
     '支付并启动'
 ];
 
+const DEFAULT_TOKEN_STATUS = {
+    source: 'env',
+    configured: false,
+    valid: false,
+    reason: 'missing',
+    message: '页面加载后会自动检查 .env 中的 HAILE_TOKEN。'
+};
+
 const state = {
     processId: null,
     currentStep: 1,
@@ -15,7 +23,7 @@ const state = {
     machines: [],
     orders: [],
     modeReady: false,
-    lastToken: '',
+    tokenStatus: { ...DEFAULT_TOKEN_STATUS },
 };
 
 const el = {};
@@ -24,12 +32,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindElements();
     bindEvents();
     renderSteps();
-    await loadConfig();
-    setStatus('当前状态：待机', '请先输入 Token，选择机器并提取模式。');
+    applyTokenStatus(DEFAULT_TOKEN_STATUS);
+
+    try {
+        await loadConfig();
+    } catch (err) {
+        userLog(`❌ 初始化配置异常：${err.message}`);
+        debugLog({ message: err.message });
+        applyTokenStatus(
+            {
+                source: 'env',
+                configured: true,
+                valid: false,
+                reason: 'check_failed',
+                message: `初始化配置失败：${err.message}`,
+            },
+            true
+        );
+        return;
+    }
+
+    if (isTokenAvailable()) {
+        setStatus('当前状态：待机', '请选择机器并提取模式。');
+    }
 });
 
 function bindElements() {
-    el.token = document.getElementById('token');
+    el.tokenStatusCard = document.getElementById('tokenStatusCard');
+    el.tokenStatusText = document.getElementById('tokenStatusText');
+    el.tokenStatusHint = document.getElementById('tokenStatusHint');
     el.machine = document.getElementById('machine');
     el.mode = document.getElementById('mode');
     el.stepStatus = document.getElementById('stepStatus');
@@ -61,17 +92,109 @@ function bindEvents() {
 async function loadConfig() {
     const data = await apiGet('/api/config');
     if (data.status !== 'success') {
-        userLog('❌ 初始化配置失败');
+        throw new Error(data.msg || '初始化配置失败');
+    }
+
+    state.machines = data.machines || [];
+    renderMachineOptions();
+    applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
+    debugLog(data);
+
+    if (isTokenAvailable()) {
+        userLog('✅ 已从服务器配置读取 Token，校验通过。');
+    } else {
+        userLog(`⚠️ 服务端 Token 不可用：${state.tokenStatus.message}`);
+    }
+}
+
+function renderMachineOptions() {
+    el.machine.innerHTML = '';
+    if (!state.machines.length) {
+        el.machine.innerHTML = '<option value="">暂无机器配置</option>';
         return;
     }
-    state.machines = data.machines || [];
-    el.machine.innerHTML = '';
+
     state.machines.forEach(machine => {
         const option = document.createElement('option');
         option.value = machine.value;
         option.textContent = machine.label;
         el.machine.appendChild(option);
     });
+}
+
+function normalizeTokenStatus(tokenStatus = {}) {
+    return {
+        source: tokenStatus.source || 'env',
+        configured: Boolean(tokenStatus.configured),
+        valid: Boolean(tokenStatus.valid),
+        reason: tokenStatus.reason || 'missing',
+        message: tokenStatus.message || '服务端 Token 状态未知。',
+    };
+}
+
+function isTokenAvailable() {
+    return state.tokenStatus.valid === true && state.tokenStatus.reason === 'ok';
+}
+
+function getTokenCardClass(reason) {
+    if (reason === 'ok') {
+        return 'ok';
+    }
+    if (reason === 'check_failed') {
+        return 'pending';
+    }
+    return 'warn';
+}
+
+function getTokenSourceLabel(source) {
+    if (source === 'env') {
+        return '.env';
+    }
+    return '服务器配置';
+}
+
+function getTokenAlertMessage() {
+    const tokenStatus = state.tokenStatus;
+    if (tokenStatus.reason === 'missing') {
+        return tokenStatus.message || '未在 .env 中配置 HAILE_TOKEN，请更新后刷新页面。';
+    }
+    if (tokenStatus.reason === 'invalid') {
+        return tokenStatus.message || '配置中的 token 无效或已失效，请更新 .env 后刷新页面。';
+    }
+    if (tokenStatus.reason === 'check_failed') {
+        return tokenStatus.message || '暂时无法校验配置 token，请稍后刷新页面。';
+    }
+    return '服务端 Token 当前不可用，请先修复配置。';
+}
+
+function applyTokenStatus(tokenStatus, notify = false) {
+    state.tokenStatus = normalizeTokenStatus(tokenStatus);
+
+    el.tokenStatusCard.className = `info-card ${getTokenCardClass(state.tokenStatus.reason)}`;
+    el.tokenStatusText.textContent = `Token 来源：${getTokenSourceLabel(state.tokenStatus.source)}`;
+    el.tokenStatusHint.textContent = state.tokenStatus.message;
+
+    if (isTokenAvailable()) {
+        if (!state.processId && !state.completed) {
+            setStatus('当前状态：待机', '请选择机器并提取模式。');
+        }
+    } else {
+        setStatus('当前状态：服务端 Token 不可用', state.tokenStatus.message);
+        renderSteps(state.currentStep, 'error');
+        if (notify) {
+            window.alert(getTokenAlertMessage());
+        }
+    }
+
+    updateActionButtons();
+}
+
+function guardTokenAvailability() {
+    if (isTokenAvailable()) {
+        return true;
+    }
+    window.alert(getTokenAlertMessage());
+    return false;
 }
 
 function setStatus(title, hint) {
@@ -98,6 +221,7 @@ function renderSteps(current = state.currentStep, status = 'idle') {
 }
 
 function updateNextButton() {
+    const disabledByToken = !isTokenAvailable();
     if (state.completed) {
         el.nextBtn.textContent = '🎉 洗涤已开始';
         el.nextBtn.disabled = true;
@@ -105,26 +229,28 @@ function updateNextButton() {
     }
     if (!state.processId) {
         el.nextBtn.textContent = '▶ 开始流程';
-        el.nextBtn.disabled = false;
+        el.nextBtn.disabled = state.running || disabledByToken;
         return;
     }
     const label = STEPS[state.currentStep - 1] || '继续执行';
     el.nextBtn.textContent = `▶ 执行第 ${state.currentStep} 步：${label}`;
-    el.nextBtn.disabled = state.running;
+    el.nextBtn.disabled = state.running || disabledByToken;
+}
+
+function updateActionButtons() {
+    const disabledByToken = !isTokenAvailable();
+    updateNextButton();
+    el.fetchModesBtn.disabled = state.running || disabledByToken;
+    el.fetchOrdersBtn.disabled = state.running || disabledByToken;
+    el.killBtn.disabled = state.running || disabledByToken;
+    el.resetBtn.disabled = state.running || disabledByToken;
 }
 
 function setBusy(running, actionLabel = '处理中...') {
     state.running = running;
-    el.nextBtn.disabled = running || state.completed;
-    el.fetchModesBtn.disabled = running;
-    el.fetchOrdersBtn.disabled = running;
-    el.killBtn.disabled = running;
-    el.resetBtn.disabled = running;
+    updateActionButtons();
     if (running) {
-        el.nextBtn.dataset.originalText = el.nextBtn.textContent;
         el.nextBtn.textContent = actionLabel;
-    } else {
-        updateNextButton();
     }
 }
 
@@ -148,29 +274,60 @@ function toggleDebug() {
     el.toggleDebugBtn.textContent = state.debugVisible ? '隐藏调试日志' : '显示调试日志';
 }
 
-function requireTokenAndMode(requireMode = false) {
-    const token = el.token.value.trim() || state.lastToken;
-    if (!token) {
-        window.alert('请先输入 Token');
-        return null;
+function requireMachineSelection() {
+    if (el.machine.value) {
+        return true;
     }
-    state.lastToken = token;
-    if (requireMode && !el.mode.value) {
-        window.alert('请先提取并选择洗涤模式');
-        return null;
+    window.alert('请先选择一台机器');
+    return false;
+}
+
+function requireModeSelection() {
+    if (el.mode.value) {
+        return true;
     }
-    return token;
+    window.alert('请先提取并选择洗涤模式');
+    return false;
+}
+
+function syncTokenFailure(data) {
+    if (!data || !data.errorType) {
+        return false;
+    }
+
+    const reasonMap = {
+        token_missing: 'missing',
+        token_invalid: 'invalid',
+        token_check_failed: 'check_failed',
+    };
+    const reason = reasonMap[data.errorType];
+    if (!reason) {
+        return false;
+    }
+
+    applyTokenStatus(
+        {
+            source: 'env',
+            configured: reason !== 'missing',
+            valid: false,
+            reason,
+            message: data.msg || getTokenAlertMessage(),
+        },
+        false
+    );
+    window.alert(getTokenAlertMessage());
+    return true;
 }
 
 async function fetchModes() {
-    const token = requireTokenAndMode(false);
-    if (!token) return;
+    if (!guardTokenAvailability() || !requireMachineSelection()) return;
     setBusy(true, '正在提取模式...');
     try {
         userLog('正在拉取机器可用模式...');
-        const data = await apiPost('/api/get_modes', { token, qr_code: el.machine.value });
+        const data = await apiPost('/api/get_modes', { qr_code: el.machine.value });
         if (data.status !== 'success') {
-            setStatus('当前状态：模式提取失败', data.msg || '请检查 Token 或机器状态');
+            syncTokenFailure(data);
+            setStatus('当前状态：模式提取失败', data.msg || '请检查机器状态');
             userLog(`❌ 模式提取失败：${data.msg}`);
             debugLog(data.debug || data);
             renderSteps(state.currentStep, 'error');
@@ -197,18 +354,19 @@ async function fetchModes() {
 }
 
 async function runNextStep() {
-    const token = requireTokenAndMode(true);
-    if (!token) return;
+    if (!guardTokenAvailability() || !requireModeSelection()) return;
 
     if (!state.processId) {
-        await startProcess(token);
+        if (!requireMachineSelection()) return;
+        await startProcess();
         if (!state.processId) return;
     }
 
     setBusy(true, '正在执行...');
     try {
-        const data = await apiPost('/api/process/next', { token, process_id: state.processId });
+        const data = await apiPost('/api/process/next', { process_id: state.processId });
         if (data.status !== 'success') {
+            syncTokenFailure(data);
             userLog(`❌ 第 ${state.currentStep} 步失败：${data.msg}`);
             setStatus(`当前状态：步骤 ${state.currentStep} 失败`, data.msg || '请根据提示重试或重置流程');
             debugLog(data.debug || data);
@@ -228,14 +386,14 @@ async function runNextStep() {
     }
 }
 
-async function startProcess(token) {
+async function startProcess() {
     try {
         const data = await apiPost('/api/process/start', {
-            token,
             qr_code: el.machine.value,
             mode_id: el.mode.value
         });
         if (data.status !== 'success') {
+            syncTokenFailure(data);
             userLog(`❌ 创建流程失败：${data.msg}`);
             setStatus('当前状态：流程创建失败', data.msg || '请检查输入参数');
             return;
@@ -260,7 +418,7 @@ function applyProcess(process) {
     state.currentStep = process.completed ? 6 : process.currentStep;
     state.completed = !!process.completed;
     renderSteps(Math.min(state.currentStep, 5), 'active');
-    updateNextButton();
+    updateActionButtons();
 }
 
 function onStepSuccess(data) {
@@ -283,15 +441,16 @@ function onStepSuccess(data) {
 }
 
 async function resetProcess() {
+    if (!guardTokenAvailability()) return;
+
     const processId = state.processId;
-    const token = el.token.value.trim() || state.lastToken;
     try {
         if (processId) {
             const data = await apiPost('/api/process/reset', {
                 process_id: processId,
-                token,
                 cleanup_remote: true
             });
+            syncTokenFailure(data);
             const cleanedCount = (data.cleanup?.cleanedOrders || []).length;
             if (cleanedCount > 0) {
                 userLog(`流程已重置，并自动结束 ${cleanedCount} 笔云端遗留订单。`);
@@ -311,18 +470,15 @@ async function resetProcess() {
     state.currentStep = 1;
     state.completed = false;
     state.running = false;
-    updateNextButton();
+    updateActionButtons();
     renderSteps(1, 'idle');
     setStatus('当前状态：已重置', '流程已清空，请重新开始。');
 }
 
 function releaseProcessOnUnload() {
-    if (!state.processId || state.completed) return;
-    const token = el.token?.value?.trim() || state.lastToken;
-    if (!token) return;
+    if (!state.processId || state.completed || !isTokenAvailable()) return;
     const payload = JSON.stringify({
         process_id: state.processId,
-        token,
         cleanup_remote: true
     });
     const blob = new Blob([payload], { type: 'application/json' });
@@ -330,12 +486,12 @@ function releaseProcessOnUnload() {
 }
 
 async function fetchOrders() {
-    const token = requireTokenAndMode(false);
-    if (!token) return;
+    if (!guardTokenAvailability()) return;
     setBusy(true, '正在刷新订单...');
     try {
-        const data = await apiPost('/api/get_orders', { token });
+        const data = await apiPost('/api/get_orders', {});
         if (data.status !== 'success') {
+            syncTokenFailure(data);
             userLog(`❌ 获取订单失败：${data.msg}`);
             debugLog(data.debug || data);
             return;
@@ -366,8 +522,7 @@ async function fetchOrders() {
 }
 
 async function killOrder() {
-    const token = requireTokenAndMode(false);
-    if (!token) return;
+    if (!guardTokenAvailability()) return;
     const orderNo = el.orderCombo.value;
     if (!orderNo) {
         window.alert('请先选择一个订单');
@@ -379,8 +534,9 @@ async function killOrder() {
     }
     setBusy(true, '正在强杀订单...');
     try {
-        const data = await apiPost('/api/kill_order', { token, order_no: orderNo });
+        const data = await apiPost('/api/kill_order', { order_no: orderNo });
         if (data.status !== 'success') {
+            syncTokenFailure(data);
             userLog(`❌ 强杀失败：${data.msg}`);
             debugLog(data.debug || data);
             return;
@@ -400,7 +556,7 @@ async function apiGet(url) {
     return parseResponse(res);
 }
 
-async function apiPost(url, body) {
+async function apiPost(url, body = {}) {
     const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

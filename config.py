@@ -4,6 +4,44 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 MACHINES_FILE = BASE_DIR / 'machines.json'
+ENV_FILE = BASE_DIR / '.env'
+ORIGINAL_ENV_KEYS = set(os.environ)
+ENV_FILE_KEYS: set[str] = set()
+
+
+def read_env_file() -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return values
+
+    for raw_line in ENV_FILE.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
+def load_env_file() -> None:
+    global ENV_FILE_KEYS
+    file_values = read_env_file()
+    current_keys = set(file_values)
+
+    for key in ENV_FILE_KEYS - current_keys:
+        if key not in ORIGINAL_ENV_KEYS:
+            os.environ.pop(key, None)
+
+    for key, value in file_values.items():
+        if key not in ORIGINAL_ENV_KEYS:
+            os.environ[key] = value
+    ENV_FILE_KEYS = current_keys
+
+
+load_env_file()
 
 DEFAULT_APP_VERSION = '2.5.9'
 DEFAULT_APP_TYPE = '2'
@@ -27,3 +65,8 @@ def load_machines():
     with MACHINES_FILE.open('r', encoding='utf-8') as f:
         data = json.load(f)
     return data
+
+
+def get_haile_token() -> str:
+    load_env_file()
+    return os.getenv('HAILE_TOKEN', '').strip()

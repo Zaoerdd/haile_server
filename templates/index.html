@@ -26,8 +26,11 @@
             </div>
 
             <div class="field-block">
-                <label for="token">身份 Token</label>
-                <input type="password" id="token" placeholder="输入抓包获取的 Token..." autocomplete="off">
+                <label>服务端 Token</label>
+                <div id="tokenStatusCard" class="info-card">
+                    <div id="tokenStatusText" class="info-title">Token 来源：服务器配置</div>
+                    <div id="tokenStatusHint" class="info-hint">页面加载后会自动检查 .env 中的 HAILE_TOKEN。</div>
+                </div>
             </div>
 
             <div class="row gap">
@@ -49,7 +52,7 @@
 
             <div class="status-card">
                 <div id="stepStatus" class="status-title">当前状态：待机</div>
-                <div id="stepHint" class="status-hint">请先输入 Token，选择机器并提取模式。</div>
+                <div id="stepHint" class="status-hint">请先确认服务端 Token 可用，再选择机器并提取模式。</div>
             </div>
 
             <div class="step-list" id="stepList"></div>
