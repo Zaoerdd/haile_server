@@ -21,18 +21,21 @@ const DEFAULT_TOKEN_STATUS = {
     message: '当前未配置可用 Token，请前往设置页处理。',
 };
 
-const CLIENT_CACHE_KEY = 'haile-ui-cache-v1';
-
 const state = {
     activeTab: 'washTab',
     tokenStatus: { ...DEFAULT_TOKEN_STATUS },
     security: null,
     scheduler: null,
     settings: null,
+    bootstrap: {
+        configLoading: true,
+        settingsLoading: true,
+        reservationsLoading: true,
+    },
     historyReady: false,
     historyRestoring: false,
     wash: {
-        loading: false,
+        loading: true,
         rooms: [],
         scanMachines: [],
         view: 'home',
@@ -79,7 +82,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     initOrderObserver();
     primeInputs();
-    restoreClientCache();
     renderWash();
     renderReservations();
     renderOrders();
@@ -436,30 +438,30 @@ function updateFormAvailability() {
     el.loadMoreOrdersBtn.disabled = disableTokenRequired || !state.orders.hasMore;
 }
 
-function persistClientCache() {
+async function loadConfig() {
     try {
-        const payload = {
-            tokenStatus: state.tokenStatus,
-            scheduler: state.scheduler,
-            settings: state.settings,
-        };
-        window.localStorage.setItem(CLIENT_CACHE_KEY, JSON.stringify(payload));
-    } catch (error) {
-        console.warn('persistClientCache failed', error);
+        const data = await apiGet('/api/config');
+        state.security = data.security || null;
+        state.scheduler = data.scheduler || null;
+        state.wash.scanMachines = data.scanMachines || [];
+        applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
+    } finally {
+        state.bootstrap.configLoading = false;
+        if (!isTokenReady()) {
+            state.wash.loading = false;
+        }
+        renderWash();
+        renderReservations();
+        renderOrders();
     }
 }
 
-function restoreClientCache() {
+async function loadSettings() {
     try {
-        const raw = window.localStorage.getItem(CLIENT_CACHE_KEY);
-        if (!raw) {
-            applyTokenStatus(DEFAULT_TOKEN_STATUS);
-            return;
-        }
-        const payload = JSON.parse(raw);
-        state.scheduler = payload.scheduler || null;
-        state.settings = payload.settings || null;
-        applyTokenStatus(payload.tokenStatus || DEFAULT_TOKEN_STATUS);
+        const data = await apiGet('/api/settings');
+        state.settings = data.settings || null;
+        state.scheduler = data.scheduler || state.scheduler;
+        applyTokenStatus(data.tokenStatus || state.tokenStatus);
 
         if (state.settings) {
             el.settingsToken.value = state.settings.token || '';
@@ -468,44 +470,18 @@ function restoreClientCache() {
             el.settingsPollInterval.value = state.settings.reservationPollIntervalSeconds || 30;
             el.reservationLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
         }
-    } catch (error) {
-        console.warn('restoreClientCache failed', error);
-        applyTokenStatus(DEFAULT_TOKEN_STATUS);
+    } finally {
+        state.bootstrap.settingsLoading = false;
+        renderSettings();
     }
-}
-
-async function loadConfig() {
-    const data = await apiGet('/api/config');
-    state.security = data.security || null;
-    state.scheduler = data.scheduler || null;
-    state.wash.scanMachines = data.scanMachines || [];
-    applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
-    persistClientCache();
-}
-
-async function loadSettings() {
-    const data = await apiGet('/api/settings');
-    state.settings = data.settings || null;
-    state.scheduler = data.scheduler || state.scheduler;
-    applyTokenStatus(data.tokenStatus || state.tokenStatus);
-
-    if (state.settings) {
-        el.settingsToken.value = state.settings.token || '';
-        el.settingsPushplusUrl.value = state.settings.pushplusUrl || '';
-        el.settingsLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
-        el.settingsPollInterval.value = state.settings.reservationPollIntervalSeconds || 30;
-        el.reservationLeadMinutes.value = state.settings.defaultLeadMinutes || 60;
-    }
-    persistClientCache();
-    renderSettings();
 }
 
 async function loadLaundrySections({ showToast = false, preserveView = false } = {}) {
     state.wash.loading = true;
     if (!preserveView) {
         state.wash.view = 'home';
-        renderWashLoading('正在加载洗衣房和扫码机组...');
     }
+    renderWashLoading('正在加载洗衣房和扫码机组...');
 
     try {
         const data = await apiGet('/api/laundry/sections');
@@ -529,11 +505,14 @@ async function loadLaundrySections({ showToast = false, preserveView = false } =
 }
 
 async function loadReservations() {
-    const data = await apiGet('/api/reservations');
-    state.reservations.items = data.items || [];
-    state.scheduler = data.scheduler || state.scheduler;
-    persistClientCache();
-    renderReservations();
+    try {
+        const data = await apiGet('/api/reservations');
+        state.reservations.items = data.items || [];
+        state.scheduler = data.scheduler || state.scheduler;
+    } finally {
+        state.bootstrap.reservationsLoading = false;
+        renderReservations();
+    }
 }
 
 async function loadActiveProcesses() {
@@ -775,16 +754,16 @@ function renderWashLoading(message) {
 }
 
 function renderWash() {
+    if (state.bootstrap.configLoading || state.wash.loading) {
+        renderWashLoading('正在加载洗衣房和扫码机组...');
+        return;
+    }
+
     if (!isTokenReady()) {
         el.washView.innerHTML = renderStatusCard('warning', '需要可用 Token', getTokenAlertMessage(), `
             <div class="spacer-sm"></div>
             <button class="btn btn-primary full-width" type="button" data-action="goto-settings">去设置</button>
         `);
-        return;
-    }
-
-    if (state.wash.loading) {
-        renderWashLoading('正在加载中...');
         return;
     }
 
@@ -1057,6 +1036,11 @@ function renderWashResult() {
 }
 
 function renderReservations() {
+    if (state.bootstrap.reservationsLoading) {
+        el.reservationList.innerHTML = `<div class="panel-card loading-card">正在加载预约和调度器状态...</div>`;
+        return;
+    }
+
     const items = state.reservations.items || [];
     const scheduler = state.scheduler || {};
     el.reservationList.innerHTML = `
@@ -1092,6 +1076,12 @@ function renderReservations() {
 }
 
 function renderOrders() {
+    if (state.bootstrap.configLoading) {
+        el.ordersList.innerHTML = `<div class="panel-card loading-card">正在加载订单页面...</div>`;
+        el.loadMoreOrdersBtn.classList.add('hidden');
+        return;
+    }
+
     if (!isTokenReady()) {
         el.ordersList.innerHTML = renderStatusCard('warning', '需要可用 Token', getTokenAlertMessage(), `
             <div class="spacer-sm"></div>
@@ -1137,6 +1127,11 @@ function renderOrders() {
 }
 
 function renderSettings() {
+    if (state.bootstrap.settingsLoading) {
+        el.settingsInfo.innerHTML = `<div class="panel-card loading-card">正在加载设置...</div>`;
+        return;
+    }
+
     const settings = state.settings || {};
     const scheduler = state.scheduler || {};
     const sources = settings.sources || {};
@@ -1848,7 +1843,6 @@ async function handleSettingsSubmit(event) {
         state.settings = data.settings || state.settings;
         state.scheduler = data.scheduler || state.scheduler;
         applyTokenStatus(data.tokenStatus || state.tokenStatus, true);
-        persistClientCache();
         renderWash();
         renderReservations();
         renderOrders();
