@@ -23,7 +23,6 @@
                         <h2>洗衣</h2>
                         <p>浏览洗衣房和扫码机组，发起下单或支付流程。</p>
                     </div>
-                    <button id="refreshWashBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
                 <div id="washView" class="stack"></div>
             </section>
@@ -34,7 +33,6 @@
                         <h2>预约</h2>
                         <p>创建单次或每周预约，并查看当前保单状态。</p>
                     </div>
-                    <button id="refreshReservationsBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
 
                 <div class="panel-card">
@@ -122,7 +120,6 @@
                         <h2>订单</h2>
                         <p>按页加载历史订单，并可查看详情或结束订单。</p>
                     </div>
-                    <button id="refreshOrdersBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
                 <div id="ordersList" class="stack"></div>
                 <div id="ordersSentinel" class="sentinel"></div>
@@ -135,7 +132,6 @@
                         <h2>设置</h2>
                         <p>管理 Token、PushPlus 链接和预约默认参数。</p>
                     </div>
-                    <button id="refreshSettingsBtn" class="btn btn-light" type="button">刷新</button>
                 </div>
 
                 <div class="panel-card">
@@ -174,6 +170,10 @@
             <button class="tabbar-btn" data-tab="orderTab" type="button">订单</button>
             <button class="tabbar-btn" data-tab="settingsTab" type="button">设置</button>
         </nav>
+        <button id="globalRefreshBtn" class="floating-refresh" type="button">
+            <span id="globalRefreshLabel" class="floating-refresh-label"></span>
+            <span id="globalRefreshMeta" class="floating-refresh-meta"></span>
+        </button>
     </div>
 
     <div id="toast" class="toast"></div>
