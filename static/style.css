@@ -148,6 +148,11 @@ label > select {
     color: var(--warning);
 }
 
+.chip.info {
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
 .status-pill.danger,
 .chip.danger {
     background: var(--danger-soft);
@@ -353,6 +358,10 @@ label > select {
     gap: 10px;
 }
 
+.order-history-list {
+    gap: 8px;
+}
+
 .process-step-list {
     display: grid;
     gap: 8px;
@@ -402,6 +411,27 @@ label > select {
     overflow: hidden;
 }
 
+.clickable-card {
+    cursor: pointer;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.clickable-card:hover {
+    border-color: rgba(39, 146, 220, 0.24);
+    box-shadow: 0 20px 42px rgba(47, 112, 149, 0.15);
+    transform: translateY(-1px);
+}
+
+.clickable-card:active {
+    transform: scale(0.995);
+}
+
+.clickable-card:focus-visible {
+    outline: none;
+    border-color: rgba(39, 146, 220, 0.32);
+    box-shadow: 0 0 0 4px rgba(39, 146, 220, 0.12), 0 20px 42px rgba(47, 112, 149, 0.15);
+}
+
 .machine-card::after,
 .order-card::after,
 .list-card::after {
@@ -440,6 +470,47 @@ label > select {
     align-items: start;
 }
 
+.row-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+}
+
+.row-card-main {
+    min-width: 0;
+    display: grid;
+    gap: 4px;
+}
+
+.row-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.row-card-head h4 {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.3;
+}
+
+.row-card-pills {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.row-card-subtitle {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
 .compact-main {
     min-width: 0;
 }
@@ -474,6 +545,26 @@ label > select {
     line-height: 1.35;
 }
 
+.card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    background: rgba(39, 146, 220, 0.12);
+    color: var(--primary);
+    font-size: 16px;
+    font-weight: 800;
+    line-height: 1;
+    flex: 0 0 auto;
+    transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.clickable-card:hover .card-icon {
+    background: rgba(39, 146, 220, 0.16);
+}
+
 .compact-meta-row {
     display: flex;
     flex-wrap: wrap;
@@ -498,6 +589,75 @@ label > select {
 .meta-pill strong {
     color: var(--text);
     font-weight: 800;
+}
+
+.process-card .compact-actions {
+    margin-top: 0;
+}
+
+.history-order-row {
+    padding: 10px 12px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.84);
+    box-shadow: 0 10px 26px rgba(47, 112, 149, 0.08);
+}
+
+.history-order-row.expanded {
+    background: rgba(255, 255, 255, 0.9);
+}
+
+.history-order-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 10px;
+    align-items: center;
+}
+
+.history-order-main {
+    min-width: 0;
+}
+
+.history-order-main h4 {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.3;
+}
+
+.history-order-main p {
+    margin: 2px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.history-order-side {
+    display: grid;
+    gap: 5px;
+    justify-items: end;
+    text-align: right;
+}
+
+.history-order-pills {
+    justify-content: flex-end;
+}
+
+.history-order-time {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.history-order-row.expanded .card-icon {
+    transform: rotate(90deg);
+}
+
+.history-order-detail {
+    padding-top: 2px;
+}
+
+.detail-actions .btn {
+    flex: 1 1 120px;
 }
 
 .detail-grid {
@@ -636,10 +796,10 @@ label > select {
 
 .toast {
     position: fixed;
-    left: 50%;
-    bottom: calc(146px + env(safe-area-inset-bottom));
-    transform: translate(-50%, 16px);
-    width: min(calc(100% - 32px), 420px);
+    top: calc(max(16px, env(safe-area-inset-top)) + 60px);
+    right: max(12px, env(safe-area-inset-right));
+    transform: translateX(16px);
+    width: min(calc(100% - 24px), 280px);
     padding: 12px 14px;
     border-radius: 16px;
     background: rgba(20, 42, 58, 0.92);
@@ -652,7 +812,7 @@ label > select {
 
 .toast.show {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translateX(0);
 }
 
 .app-dialog {
@@ -731,6 +891,36 @@ label > select {
         justify-items: start;
         text-align: left;
     }
+
+    .row-card-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .row-card-pills {
+        justify-content: flex-start;
+    }
+
+    .history-order-summary {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+    }
+
+    .history-order-side {
+        grid-column: 1 / 2;
+        justify-items: start;
+        text-align: left;
+    }
+
+    .history-order-pills {
+        justify-content: flex-start;
+    }
+
+    .history-order-summary .card-icon {
+        grid-column: 2 / 3;
+        grid-row: 1 / span 2;
+        align-self: center;
+    }
 }
 
 @media (max-width: 420px) {
@@ -756,5 +946,10 @@ label > select {
     .floating-refresh {
         width: calc(100% - 24px);
         bottom: calc(78px + env(safe-area-inset-bottom));
+    }
+
+    .toast {
+        top: calc(max(12px, env(safe-area-inset-top)) + 56px);
+        width: min(calc(100% - 24px), 252px);
     }
 }

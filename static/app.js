@@ -190,8 +190,10 @@ function bindEvents() {
     });
 
     el.washView.addEventListener('click', handleWashClick);
+    el.washView.addEventListener('keydown', handleClickableCardKeydown);
     el.reservationList.addEventListener('click', handleReservationClick);
     el.ordersList.addEventListener('click', handleOrderClick);
+    el.ordersList.addEventListener('keydown', handleClickableCardKeydown);
     el.settingsForm.addEventListener('submit', handleSettingsSubmit);
     el.reservationForm.addEventListener('submit', handleReservationSubmit);
     el.loadMoreOrdersBtn.addEventListener('click', async () => {
@@ -252,6 +254,18 @@ function bindEvents() {
         clearActiveAutoRefresh();
         clearReservationAutoRefresh();
     });
+}
+
+function handleClickableCardKeydown(event) {
+    if (event.defaultPrevented || (event.key !== 'Enter' && event.key !== ' ')) {
+        return;
+    }
+    const card = event.target.closest('[data-clickable-card="true"]');
+    if (!card || event.target !== card) {
+        return;
+    }
+    event.preventDefault();
+    card.click();
 }
 
 function initOrderObserver() {
@@ -1270,6 +1284,10 @@ function renderMetaPill(label, value) {
     return `<span class="meta-pill">${escapeHtml(label)}<strong>${escapeHtml(text)}</strong></span>`;
 }
 
+function renderCardIcon() {
+    return '<span class="card-icon" aria-hidden="true">></span>';
+}
+
 function renderWashLoading(message) {
     el.washView.innerHTML = `<div class="panel-card loading-card">${escapeHtml(message)}</div>`;
 }
@@ -1316,7 +1334,6 @@ function renderWashHomeView() {
             <div class="compact-summary">
                 <div class="compact-main">
                     <h3>洗衣房</h3>
-                    <p>按房间快速找空闲设备。</p>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip pending">${rooms.length} 个</span>
@@ -1331,7 +1348,6 @@ function renderWashHomeView() {
             <div class="compact-summary">
                 <div class="compact-main">
                     <h3>扫码机组</h3>
-                    <p>从本地机组直接进入手动流程。</p>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip warning">${scanMachines.length} 台</span>
@@ -1643,7 +1659,6 @@ function renderOrders() {
             <div class="compact-summary">
                 <div class="compact-main">
                     <h3>待继续流程</h3>
-                    <p>已创建订单但未走完的流程会保留在这里。</p>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip warning">${activeProcesses.length} 条</span>
@@ -1658,14 +1673,13 @@ function renderOrders() {
             <div class="compact-summary">
                 <div class="compact-main">
                     <h3>历史订单</h3>
-                    <p>下拉自动加载更多，展开查看完整信息。</p>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip pending">${state.orders.total || items.length} 条</span>
                 </div>
             </div>
             <div class="spacer-sm"></div>
-            <div class="order-list">
+            <div class="order-list order-history-list">
                 ${items.length ? items.map(order => renderHistoryOrderCard(order, processByOrderNo.get(order.orderNo) || null)).join('') : renderEmptyState('暂无订单', '当前没有可显示的历史订单。')}
             </div>
         </section>
@@ -1729,40 +1743,51 @@ function renderSettings() {
 function renderRoomCard(room) {
     const subtitle = uniqueSubtitle(room.name || '洗衣房', room.address || '');
     return `
-        <article class="list-card">
-            <div class="compact-card-head">
-                <div class="compact-main">
+        <article
+            class="list-card row-card clickable-card"
+            role="button"
+            tabindex="0"
+            data-clickable-card="true"
+            data-action="open-room"
+            data-room-id="${escapeHtml(room.id)}"
+            aria-label="查看${escapeHtml(room.name || '洗衣房')}设备"
+        >
+            <div class="row-card-main">
+                <div class="row-card-head">
                     <h4>${escapeHtml(room.name || '洗衣房')}</h4>
-                    ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+                    <div class="row-card-pills">
+                        <span class="chip info">${escapeHtml(stringOrFallback(room.idleCount, '--'))} 空闲</span>
+                        <span class="chip ${room.enableReserve ? 'success' : 'pending'}">${room.enableReserve ? '可预约' : '普通房间'}</span>
+                    </div>
                 </div>
-                <div class="compact-side">
-                    <span class="chip ${room.enableReserve ? 'success' : 'pending'}">${room.enableReserve ? '可预约' : '普通房间'}</span>
-                    <span class="compact-side-value">${escapeHtml(stringOrFallback(room.idleCount, '--'))} 空闲</span>
-                </div>
+                ${subtitle ? `<p class="row-card-subtitle">${escapeHtml(subtitle)}</p>` : ''}
             </div>
-            <div class="spacer-sm"></div>
-            <div class="compact-actions">
-                <button class="btn btn-primary" type="button" data-action="open-room" data-room-id="${escapeHtml(room.id)}">查看设备</button>
-            </div>
+            ${renderCardIcon()}
         </article>
     `;
 }
 
 function renderScanMachineCard(machine) {
     return `
-        <article class="list-card">
-            <div class="compact-card-head">
-                <div class="compact-main">
+        <article
+            class="list-card row-card clickable-card"
+            role="button"
+            tabindex="0"
+            data-clickable-card="true"
+            data-action="open-scan"
+            data-qr-code="${escapeHtml(machine.qrCode)}"
+            aria-label="进入${escapeHtml(machine.label || '扫码机组')}流程"
+        >
+            <div class="row-card-main">
+                <div class="row-card-head">
                     <h4>${escapeHtml(machine.label || '扫码机组')}</h4>
-                    <p>二维码编号：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
+                    <div class="row-card-pills">
+                        <span class="chip warning">手动流程</span>
+                    </div>
                 </div>
-                <div class="compact-side">
-                    <span class="chip warning">手动流程</span>
-                </div>
+                <p class="row-card-subtitle">二维码：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
             </div>
-            <div class="compact-actions">
-                <button class="btn btn-primary" type="button" data-action="open-scan" data-qr-code="${escapeHtml(machine.qrCode)}">进入流程</button>
-            </div>
+            ${renderCardIcon()}
         </article>
     `;
 }
@@ -1836,23 +1861,23 @@ function renderReservationCard(task) {
 function renderActiveProcessCard(process) {
     const order = process.order || {};
     const timeMeta = getOrderTimeMeta(order);
+    const metaRow = [
+        renderMetaPill('订单状态', order.stateDesc || ''),
+        timeMeta ? renderMetaPill(timeMeta.countdownLabel, timeMeta.countdownText) : '',
+    ].filter(Boolean).join('');
     return `
-        <article class="order-card">
+        <article class="order-card process-card">
             <div class="compact-card-head">
                 <div class="compact-main">
                     <h4>${escapeHtml(order.machineName || '待继续流程')}</h4>
-                    <p>订单号：${escapeHtml(process.orderNo || '--')}</p>
+                    <p>最近更新 ${escapeHtml(formatDateTime(process.updatedAt))}</p>
                 </div>
                 <div class="compact-side">
                     <span class="chip warning">${escapeHtml(process.currentStepLabel || '待继续')}</span>
-                    <span class="compact-side-value">${escapeHtml(formatDateTime(process.updatedAt))}</span>
+                    ${timeMeta ? `<span class="compact-side-value">${escapeHtml(formatDateTime(timeMeta.value))}</span>` : ''}
                 </div>
             </div>
-            <div class="compact-meta-row">
-                ${renderMetaPill('订单状态', order.stateDesc || '')}
-                ${renderMetaPill('页面状态', order.pageCode || '')}
-                ${timeMeta ? renderMetaPill(timeMeta.countdownLabel, timeMeta.countdownText) : ''}
-            </div>
+            ${metaRow ? `<div class="compact-meta-row">${metaRow}</div>` : ''}
             ${process.blockedReason ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(process.blockedReason)}</div>` : ''}
             <div class="spacer-sm"></div>
             <div class="compact-actions">
@@ -1874,37 +1899,39 @@ function renderHistoryOrderCard(order, activeProcess) {
     };
     const buttonSwitch = mergedOrder.buttonSwitch || {};
     const timeMeta = getOrderTimeMeta(mergedOrder);
+    const summaryTime = formatDateTime((timeMeta && timeMeta.value) || mergedOrder.createTime || order.createTime);
     return `
-        <article class="order-card">
-            <div class="compact-card-head">
-                <div class="compact-main">
+        <article
+            class="order-card history-order-row clickable-card ${expanded ? 'expanded' : ''}"
+            role="button"
+            tabindex="0"
+            aria-expanded="${expanded ? 'true' : 'false'}"
+            data-clickable-card="true"
+            data-action="toggle-order-detail"
+            data-order-no="${escapeHtml(order.orderNo)}"
+            aria-label="${expanded ? '收起' : '展开'}${escapeHtml(mergedOrder.machineName || order.machineName || '订单')}详情"
+        >
+            <div class="history-order-summary">
+                <div class="history-order-main">
                     <h4>${escapeHtml(mergedOrder.machineName || order.machineName || '订单')}</h4>
-                    <p>${escapeHtml(joinCompactText([mergedOrder.modeName || order.modeName || '--', order.orderNo || '--']))}</p>
+                    <p>${escapeHtml(mergedOrder.modeName || order.modeName || '未知模式')}</p>
                 </div>
-                <div class="compact-side">
-                    <div class="inline-row">
+                <div class="history-order-side">
+                    <div class="inline-row history-order-pills">
                         ${activeProcess ? '<span class="chip warning">流程进行中</span>' : ''}
                         <span class="chip ${orderChipClass(mergedOrder.state)}">${escapeHtml(mergedOrder.stateDesc || order.stateDesc || '未知状态')}</span>
                     </div>
-                    <span class="compact-side-value">${escapeHtml(timeMeta ? timeMeta.countdownText : formatDateTime(mergedOrder.createTime || order.createTime))}</span>
+                    <span class="history-order-time">${escapeHtml(summaryTime)}</span>
                 </div>
+                ${renderCardIcon()}
             </div>
-            <div class="compact-meta-row">
-                ${renderMetaPill('创建时间', formatDateTime(mergedOrder.createTime || order.createTime))}
-                ${timeMeta ? renderMetaPill(timeMeta.label, formatDateTime(timeMeta.value)) : ''}
-            </div>
-            <div class="spacer-sm"></div>
-            <div class="compact-actions">
-                <button class="btn btn-light" type="button" data-action="toggle-order-detail" data-order-no="${escapeHtml(order.orderNo)}">${expanded ? '收起详情' : '展开详情'}</button>
-                ${buttonSwitch.canCloseOrder ? `<button class="btn btn-danger" type="button" data-action="finish-order" data-order-no="${escapeHtml(order.orderNo)}">结束订单</button>` : ''}
-                ${buttonSwitch.canCancel ? `<button class="btn btn-light" type="button" data-action="cancel-order" data-order-no="${escapeHtml(order.orderNo)}">取消订单</button>` : ''}
-            </div>
-            ${expanded ? renderOrderDetail(detail || processOrder || mergedOrder) : ''}
+            ${expanded ? renderOrderDetail(detail || processOrder || mergedOrder, { orderNo: order.orderNo, buttonSwitch }) : ''}
         </article>
     `;
 }
 
-function renderOrderDetail(detail) {
+function renderOrderDetail(detail, options = {}) {
+    const { orderNo = '', buttonSwitch = {} } = options;
     if (!detail) {
         return `
             <div class="spacer-sm"></div>
@@ -1912,17 +1939,26 @@ function renderOrderDetail(detail) {
         `;
     }
     const timeMeta = getOrderTimeMeta(detail);
+    const resolvedOrderNo = detail.orderNo || orderNo || '--';
+    const actionButtons = [
+        buttonSwitch.canCloseOrder ? `<button class="btn btn-danger" type="button" data-action="finish-order" data-order-no="${escapeHtml(resolvedOrderNo)}">结束订单</button>` : '',
+        buttonSwitch.canCancel ? `<button class="btn btn-light" type="button" data-action="cancel-order" data-order-no="${escapeHtml(resolvedOrderNo)}">取消订单</button>` : '',
+    ].filter(Boolean).join('');
     return `
         <div class="spacer-sm"></div>
-        <div class="detail-grid">
-            <div><span>状态</span><span>${escapeHtml(detail.stateDesc || '--')}</span></div>
-            <div><span>页面状态</span><span>${escapeHtml(detail.pageCode || '--')}</span></div>
-            <div><span>价格</span><span>${escapeHtml(stringOrFallback(detail.price, '--'))}</span></div>
-            <div><span>支付时间</span><span>${escapeHtml(formatDateTime(detail.payTime))}</span></div>
-            <div><span>${escapeHtml(timeMeta ? timeMeta.label : '时间')}</span><span>${escapeHtml(formatDateTime(timeMeta ? timeMeta.value : ''))}</span></div>
-            <div><span>${escapeHtml(timeMeta ? timeMeta.countdownLabel : '当前阶段')}</span><span>${escapeHtml(timeMeta ? timeMeta.countdownText : '--')}</span></div>
-            <div><span>洗衣房</span><span>${escapeHtml(detail.shopName || '--')}</span></div>
-            <div><span>模式</span><span>${escapeHtml(detail.modeName || '--')}</span></div>
+        <div class="history-order-detail">
+            <div class="detail-grid">
+                <div><span>订单号</span><span>${escapeHtml(resolvedOrderNo)}</span></div>
+                <div><span>状态</span><span>${escapeHtml(detail.stateDesc || '--')}</span></div>
+                <div><span>页面状态</span><span>${escapeHtml(detail.pageCode || '--')}</span></div>
+                <div><span>价格</span><span>${escapeHtml(stringOrFallback(detail.price, '--'))}</span></div>
+                <div><span>支付时间</span><span>${escapeHtml(formatDateTime(detail.payTime))}</span></div>
+                <div><span>${escapeHtml(timeMeta ? timeMeta.label : '时间')}</span><span>${escapeHtml(formatDateTime(timeMeta ? timeMeta.value : ''))}</span></div>
+                <div><span>${escapeHtml(timeMeta ? timeMeta.countdownLabel : '当前阶段')}</span><span>${escapeHtml(timeMeta ? timeMeta.countdownText : '--')}</span></div>
+                <div><span>洗衣房</span><span>${escapeHtml(detail.shopName || '--')}</span></div>
+                <div><span>模式</span><span>${escapeHtml(detail.modeName || '--')}</span></div>
+            </div>
+            ${actionButtons ? `<div class="spacer-sm"></div><div class="compact-actions detail-actions">${actionButtons}</div>` : ''}
         </div>
     `;
 }
@@ -2460,7 +2496,7 @@ async function refreshSingleOrder(orderNo, initialDetail = null) {
             handleRequestError(error, '刷新订单详情失败。', true);
         }
     }
-    await loadOrders(true);
+    await loadOrders(true, { preserveItems: true });
 }
 
 function updateOrderFromDetail(orderNo, detail) {
