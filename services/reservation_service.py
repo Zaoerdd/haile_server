@@ -330,9 +330,8 @@ class ReservationService:
         if self._classify_order_detail(detail) != 'pending':
             return False
         page_code = str(detail.get('pageCode') or '')
-        state_desc = str(detail.get('stateDesc') or '')
         can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
-        return can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc
+        return can_pay or page_code == 'waiting_choose_ump'
 
     def _settle_pending_order_detail(
         self,
@@ -340,7 +339,7 @@ class ReservationService:
         order_no: str,
         detail: Dict[str, Any],
         *,
-        max_checks: int = 2,
+        max_checks: int = 4,
     ) -> Dict[str, Any]:
         normalized_order_no = str(order_no or '').strip()
         current = detail if isinstance(detail, dict) else {}
@@ -379,7 +378,10 @@ class ReservationService:
         if not normalized_order_no:
             return False, None, debug, '缺少 orderNo，无法推进到待付款状态。'
 
-        if self._classify_order_detail(current) != 'pending':
+        classification = self._classify_order_detail(current)
+        if classification == 'manual_check_required':
+            return False, current if isinstance(current, dict) else None, debug, '订单进入了门店详情下单的待验证阶段，当前扫码预约不能接管。'
+        if classification != 'pending':
             return False, current if isinstance(current, dict) else None, debug, '订单当前不是待支付状态。'
 
         if not self._is_final_pending_stage(current):
@@ -400,7 +402,10 @@ class ReservationService:
 
         current = self._settle_pending_order_detail(client, normalized_order_no, current)
         debug['settledDetail'] = current
-        if self._classify_order_detail(current) != 'pending' or not self._is_final_pending_stage(current):
+        classification = self._classify_order_detail(current)
+        if classification == 'manual_check_required':
+            return False, current if isinstance(current, dict) else None, debug, '订单进入了门店详情下单的待验证阶段，当前扫码预约不能接管。'
+        if classification != 'pending' or not self._is_final_pending_stage(current):
             return False, current if isinstance(current, dict) else None, debug, '订单未能进入最终待付款状态。'
         return True, current, debug, None
 
@@ -871,7 +876,15 @@ class ReservationService:
         if existing_order:
             order_no, detail = existing_order
             return True, order_no, detail, 'adopted'
-        create_res = client.create_scan_order(goods_id=str(goods_id), mode_id=task.mode_id, hash_key=str(scan_data.get('activityHashKey') or ''))
+        goods_detail_res = client.goods_details(str(goods_id))
+        if not goods_detail_res.get('ok'):
+            return False, goods_detail_res.get('msg') or '读取设备详情失败。', goods_detail_res.get('raw'), 'failed'
+        create_res = client.create_scan_order(
+            goods_id=str(goods_id),
+            mode_id=task.mode_id,
+            hash_key=str(scan_data.get('activityHashKey') or ''),
+            goods_detail=goods_detail_res.get('data') or {},
+        )
         if not create_res.get('ok'):
             if create_res.get('error_type') == 'business':
                 existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
@@ -892,6 +905,11 @@ class ReservationService:
             return False, error_msg or '订单未能进入最终待付款状态。', debug, 'failed'
         return True, order_no, detail, 'created'
 
+    def _is_manual_check_stage(self, detail: Dict[str, Any]) -> bool:
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        return page_code == 'waiting_check' or '待验证' in state_desc
+
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
         state = int(detail.get('state') or 0)
         state_desc = str(detail.get('stateDesc') or '')
@@ -899,11 +917,13 @@ class ReservationService:
         can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
         if state in COMPLETED_ORDER_STATES or '已完成' in state_desc:
             return 'completed'
-        if state in RUNNING_ORDER_STATES or '进行中' in state_desc or '洗衣中' in state_desc:
+        if state in RUNNING_ORDER_STATES or '进行中' in state_desc or '运行中' in state_desc or '洗衣中' in state_desc or '烘干中' in state_desc or '脱水中' in state_desc:
             return 'running'
-        if state in CLOSED_ORDER_STATES or '关闭' in state_desc or '取消' in state_desc:
+        if state in CLOSED_ORDER_STATES or '关闭' in state_desc or '取消' in state_desc or '失效' in state_desc:
             return 'closed'
-        if state in PENDING_ORDER_STATES or can_pay or '待支付' in state_desc or '待验证' in state_desc or page_code in {'waiting_check', 'place_clothes', 'waiting_choose_ump'}:
+        if self._is_manual_check_stage(detail):
+            return 'manual_check_required'
+        if state in PENDING_ORDER_STATES or can_pay or '待支付' in state_desc or page_code in {'place_clothes', 'waiting_choose_ump'}:
             return 'pending'
         return 'unknown'
 

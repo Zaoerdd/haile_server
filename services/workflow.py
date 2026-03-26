@@ -67,7 +67,7 @@ PENDING_ORDER_STATES = {50}
 CLOSED_ORDER_STATES = {401, 411}
 RUNNING_ORDER_STATES = {500}
 COMPLETED_ORDER_STATES = {1000}
-ACTIVE_PAGE_CODES = {'waiting_check', 'place_clothes', 'waiting_choose_ump'}
+ACTIVE_PAGE_CODES = {'place_clothes', 'waiting_choose_ump'}
 
 
 def now_iso() -> str:
@@ -323,6 +323,10 @@ class WorkflowManager:
             state.completed = False
             state.terminated = True
             state.blocked_reason = '订单已关闭或失效，流程无法继续。'
+        elif classification == 'manual_check_required':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '当前订单进入门店详情下单的待验证阶段，不能继续按扫码下单流程推进。'
         elif classification in {'running', 'completed'}:
             state.completed = True
             state.terminated = False
@@ -504,26 +508,61 @@ class WorkflowManager:
 
     def cleanup_order_by_no(self, token: str, order_no: str) -> Dict[str, Any]:
         client = HaierClient(token)
-        finish_res = client.finish_order(order_no)
-        if not finish_res.get('ok'):
+        detail_res = client.order_detail(order_no)
+        detail = detail_res.get('data') or {}
+        classification = self._classify_order_detail(detail) if detail_res.get('ok') else 'unknown'
+
+        if classification == 'closed':
+            return {
+                'status': 'success',
+                'msg': '当前流程对应的云端订单已关闭，无需重复清理。',
+                'matchedOrders': [{'orderNo': order_no}],
+                'cleanedOrders': [{'orderNo': order_no}],
+                'blockedOrders': [],
+                'failedOrders': [],
+                'debug': {'orderDetail': detail_res.get('raw')},
+            }
+
+        if classification == 'pending':
+            cleanup_action = 'cancel'
+            cleanup_res = client.cancel_order(order_no)
+            success_msg = '已自动取消当前流程对应的云端订单。'
+            failure_msg = '自动取消订单失败。'
+            failure_reason = '自动取消失败。'
+        else:
+            cleanup_action = 'finish'
+            cleanup_res = client.finish_order(order_no)
+            success_msg = '已自动结束当前流程对应的云端订单。'
+            failure_msg = '自动结束订单失败。'
+            failure_reason = '自动结束失败。'
+
+        if not cleanup_res.get('ok'):
             return {
                 'status': 'error',
-                'errorType': finish_res.get('error_type', 'remote_cleanup_failed'),
-                'msg': finish_res.get('msg') or '自动结束订单失败。',
+                'errorType': cleanup_res.get('error_type', 'remote_cleanup_failed'),
+                'msg': cleanup_res.get('msg') or failure_msg,
                 'matchedOrders': [{'orderNo': order_no}],
                 'cleanedOrders': [],
                 'blockedOrders': [],
-                'failedOrders': [{'orderNo': order_no, 'reason': finish_res.get('msg') or '自动结束失败。'}],
-                'debug': finish_res.get('raw'),
+                'failedOrders': [{'orderNo': order_no, 'reason': cleanup_res.get('msg') or failure_reason}],
+                'debug': {
+                    'action': cleanup_action,
+                    'orderDetail': detail_res.get('raw'),
+                    'cleanup': cleanup_res.get('raw'),
+                },
             }
         return {
             'status': 'success',
-            'msg': '已自动结束当前流程对应的云端订单。',
+            'msg': success_msg,
             'matchedOrders': [{'orderNo': order_no}],
             'cleanedOrders': [{'orderNo': order_no}],
             'blockedOrders': [],
             'failedOrders': [],
-            'debug': finish_res.get('raw'),
+            'debug': {
+                'action': cleanup_action,
+                'orderDetail': detail_res.get('raw'),
+                'cleanup': cleanup_res.get('raw'),
+            },
         }
 
     def _build_process_payload(self, state: ProcessState, token: str, sync_remote: bool = False) -> Dict[str, Any]:
@@ -638,6 +677,11 @@ class WorkflowManager:
             state.completed = False
             state.blocked_reason = '订单已关闭或失效，流程无法继续。'
             return self._error('process_blocked', state.blocked_reason, state, detail_res.get('raw'))
+        if classification == 'manual_check_required':
+            state.terminated = True
+            state.completed = False
+            state.blocked_reason = '当前订单进入门店详情下单的待验证阶段，不能继续按扫码下单流程推进。'
+            return self._error('unsupported_order_stage', state.blocked_reason, state, detail_res.get('raw'))
         if classification in {'running', 'completed'}:
             state.completed = True
             state.terminated = False
@@ -645,13 +689,7 @@ class WorkflowManager:
             state.blocked_reason = None
             return self._success(state, '订单已支付并启动，流程已自动完成。', detail_res.get('raw'))
         if classification == 'pending':
-            if state.flow_type == MANUAL_SCAN_FLOW_TYPE:
-                self._hydrate_context_from_detail(state, detail)
-                state.completed = False
-                state.terminated = False
-                state.blocked_reason = None
-            else:
-                self._apply_pending_detail_to_state(state, detail)
+            self._apply_pending_detail_to_state(state, detail)
             return None
         self._hydrate_context_from_detail(state, detail)
         state.blocked_reason = None
@@ -678,6 +716,11 @@ class WorkflowManager:
         page_code = str(detail.get('pageCode') or '')
         can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
         return can_pay or page_code == 'waiting_choose_ump'
+
+    def _is_manual_check_stage(self, detail: Dict[str, Any]) -> bool:
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        return page_code == 'waiting_check' or '待验证' in state_desc
 
     def _settle_pending_order_detail(
         self,
@@ -711,6 +754,56 @@ class WorkflowManager:
                     current = final_detail
 
         return current
+
+    def _advance_after_create_order(
+        self,
+        state: ProcessState,
+        client: HaierClient,
+        *,
+        debug: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        order_no = str(state.context.get('order_no') or '').strip()
+        if not order_no:
+            return self._error('invalid_state', '缺少 orderNo，请重新开始流程。', state)
+
+        debug_payload = dict(debug or {})
+        detail_res = client.order_detail(order_no)
+        debug_payload['orderDetail'] = detail_res.get('raw')
+        if not detail_res.get('ok'):
+            return self._error_result(detail_res, state)
+
+        detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+        debug_payload['settledDetail'] = detail
+        classification = self._classify_order_detail(detail)
+        self._hydrate_context_from_detail(state, detail)
+
+        if classification == 'closed':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '订单已关闭或失效，流程无法继续。'
+            return self._error('process_blocked', state.blocked_reason, state, debug_payload)
+
+        if classification == 'manual_check_required':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '当前订单进入门店详情下单的待验证阶段，不能继续按扫码下单流程推进。'
+            return self._error('unsupported_order_stage', state.blocked_reason, state, debug_payload)
+
+        if classification in {'running', 'completed'}:
+            state.completed = True
+            state.terminated = False
+            state.current_step = 6
+            state.blocked_reason = None
+            return self._success(state, '订单已支付并启动，流程已自动完成。', debug_payload)
+
+        if classification != 'pending':
+            return self._error('order_not_ready', '新建订单后未能进入可继续状态，请稍后重试。', state, debug_payload)
+
+        self._apply_pending_detail_to_state(state, detail)
+        success_msg = '步骤 2 完成：订单已创建，请继续确认放衣。'
+        if state.current_step >= 4:
+            success_msg = '步骤 2 完成：订单已创建，并已进入待付款状态。'
+        return self._success(state, success_msg, debug_payload)
 
     def _advance_to_payment_stage(
         self,
@@ -759,6 +852,12 @@ class WorkflowManager:
             state.blocked_reason = '订单已关闭或失效，流程无法继续。'
             return self._error('process_blocked', state.blocked_reason, state, debug_payload)
 
+        if classification == 'manual_check_required':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '当前订单进入门店详情下单的待验证阶段，不能继续按扫码下单流程推进。'
+            return self._error('unsupported_order_stage', state.blocked_reason, state, debug_payload)
+
         if classification in {'running', 'completed'}:
             state.completed = True
             state.terminated = False
@@ -795,10 +894,12 @@ class WorkflowManager:
 
         if state in COMPLETED_ORDER_STATES or '已完成' in state_desc or '完成' in state_desc:
             return 'completed'
-        if state in RUNNING_ORDER_STATES or '运行中' in state_desc or '洗涤中' in state_desc or '烘干中' in state_desc:
+        if state in RUNNING_ORDER_STATES or '运行中' in state_desc or '洗涤中' in state_desc or '烘干中' in state_desc or '脱水中' in state_desc:
             return 'running'
         if state in CLOSED_ORDER_STATES or '关闭' in state_desc or '取消' in state_desc or '失效' in state_desc:
             return 'closed'
+        if self._is_manual_check_stage(detail):
+            return 'manual_check_required'
         if state in PENDING_ORDER_STATES or can_pay or can_cancel or can_close or page_code in ACTIVE_PAGE_CODES:
             return 'pending'
         return 'unknown'
@@ -841,7 +942,20 @@ class WorkflowManager:
         return self._success(state, '步骤 1 完成：已解析机器并取得临时参数。', res.get('raw'))
 
     def _step_create_order(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
-        res = client.create_order(state.context['goods_id'], state.mode_id, state.context.get('hash_key', ''))
+        goods_detail_res = client.goods_details(str(state.context['goods_id']))
+        if not goods_detail_res.get('ok'):
+            return self._error_result(goods_detail_res, state)
+
+        goods_detail = goods_detail_res.get('data') or {}
+        if not isinstance(goods_detail, dict) or not goods_detail:
+            return self._error('invalid_response', '读取设备详情成功，但返回数据为空。', state, goods_detail_res.get('raw'))
+
+        res = client.create_order(
+            state.context['goods_id'],
+            state.mode_id,
+            state.context.get('hash_key', ''),
+            goods_detail=goods_detail,
+        )
         if not res.get('ok'):
             return self._error_result(res, state)
         data = res.get('data') or {}
@@ -849,11 +963,13 @@ class WorkflowManager:
         if not order_no:
             return self._error('invalid_response', '创建订单成功，但未返回 orderNo。', state, res.get('raw'))
         state.context['order_no'] = str(order_no)
-        return self._advance_to_payment_stage(
+        return self._advance_after_create_order(
             state,
             client,
-            success_msg='步骤 2 完成：订单已创建，并已自动放入衣物进入待付款状态。',
-            debug={'createOrder': res.get('raw')},
+            debug={
+                'goodsDetail': goods_detail_res.get('raw'),
+                'createOrder': res.get('raw'),
+            },
         )
 
     def _step_place_clothes(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
@@ -864,49 +980,114 @@ class WorkflowManager:
         )
 
     def _step_prepare_payment(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
-        create_res = client.create_underway(state.context['order_no'])
+        order_no = str(state.context.get('order_no') or '').strip()
+        if not order_no:
+            return self._error('invalid_state', '缺少 orderNo，请重新开始流程。', state)
+
+        debug_payload: Dict[str, Any] = {}
+        detail_res = client.order_detail(order_no)
+        debug_payload['orderDetail'] = detail_res.get('raw')
+        if not detail_res.get('ok'):
+            return self._error_result(detail_res, state)
+
+        detail = detail_res.get('data') or {}
+        self._hydrate_context_from_detail(state, detail)
+        goods_id = str(state.context.get('goods_id') or '').strip()
+        category_code = HaierClient.extract_category_code(detail, default='')
+        if not goods_id or not category_code:
+            goods_detail_res = client.goods_details(goods_id)
+            debug_payload['goodsDetail'] = goods_detail_res.get('raw')
+            if not goods_detail_res.get('ok'):
+                return self._error_result(goods_detail_res, state)
+            goods_detail = goods_detail_res.get('data') or {}
+            if not isinstance(goods_detail, dict) or not goods_detail:
+                return self._error('invalid_response', '读取设备详情成功，但返回数据为空。', state, debug_payload)
+            goods_id = str(goods_detail.get('id') or goods_detail.get('goodsId') or '').strip()
+            category_code = HaierClient.extract_category_code(goods_detail)
+
+        if not goods_id or not category_code:
+            return self._error('invalid_response', '无法解析当前设备的 goodsId 或类型。', state, debug_payload)
+
+        checkstand_res = client.checkstand(order_no)
+        debug_payload['checkstand'] = checkstand_res.get('raw')
+        if not checkstand_res.get('ok'):
+            return self._error_result(checkstand_res, state)
+
+        preview_res = client.underway_preview(order_no)
+        debug_payload['underwayPreview'] = preview_res.get('raw')
+        if not preview_res.get('ok'):
+            return self._error_result(preview_res, state)
+
+        verify_res = client.goods_verify(goods_id, category_code=category_code)
+        debug_payload['goodsVerify'] = {
+            'goodsId': goods_id,
+            'categoryCode': category_code,
+            'result': verify_res.get('raw'),
+        }
+        if not verify_res.get('ok'):
+            return self._error_result(verify_res, state)
+
+        create_res = client.create_underway(order_no)
+        debug_payload['underwayCreate'] = create_res.get('raw')
         if not create_res.get('ok'):
             return self._error_result(create_res, state)
         prepay_res = self._refresh_prepay_param(state, client, allow_create_underway_fallback=False)
         if prepay_res.get('status') == 'error':
+            merged_debug = dict(debug_payload)
+            merged_debug['prePay'] = prepay_res.get('debug')
+            prepay_res['debug'] = merged_debug
             return prepay_res
         state.current_step = 5
+        debug_payload['prePay'] = prepay_res.get('debug')
         return self._success(
             state,
             '步骤 4 完成：已生成预支付参数。',
-            {
-                'underwayCreate': create_res.get('raw'),
-                'prePay': prepay_res.get('debug'),
-            },
+            debug_payload,
         )
 
     def _step_pay(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
-        refresh_result = self._refresh_prepay_param(state, client, allow_create_underway_fallback=True)
-        if refresh_result.get('status') == 'error':
-            return refresh_result
+        debug_payload: Dict[str, Any] = {}
+        cached_prepay_param = str(state.context.get('prepay_param') or '').strip()
 
-        first_pay = client.pay(state.context['prepay_param'])
-        if not first_pay.get('ok'):
-            retry_refresh = self._refresh_prepay_param(state, client, allow_create_underway_fallback=True)
-            if retry_refresh.get('status') == 'success':
-                second_pay = client.pay(state.context['prepay_param'])
-                if second_pay.get('ok'):
-                    state.current_step = 6
-                    state.completed = True
-                    return self._success(
-                        state,
-                        '步骤 5 完成：支付成功，设备已启动。',
-                        {
-                            'firstPay': first_pay.get('raw'),
-                            'refreshPrepay': retry_refresh.get('debug'),
-                            'secondPay': second_pay.get('raw'),
-                        },
-                    )
-            return self._error_result(first_pay, state)
+        if not cached_prepay_param:
+            refresh_result = self._refresh_prepay_param(state, client, allow_create_underway_fallback=True)
+            if refresh_result.get('status') == 'error':
+                return refresh_result
+            debug_payload['initialPrePay'] = refresh_result.get('debug')
+            cached_prepay_param = str(state.context.get('prepay_param') or '').strip()
 
-        state.current_step = 6
-        state.completed = True
-        return self._success(state, '步骤 5 完成：支付成功，设备已启动。', first_pay.get('raw'))
+        if not cached_prepay_param:
+            return self._error('invalid_state', '缺少 prepayParam，请重新生成支付参数后再试。', state, debug_payload)
+
+        first_pay = client.pay(cached_prepay_param)
+        debug_payload['firstPay'] = first_pay.get('raw')
+        if first_pay.get('ok'):
+            state.current_step = 6
+            state.completed = True
+            return self._success(state, '步骤 5 完成：支付成功，设备已启动。', debug_payload)
+
+        retry_refresh = self._refresh_prepay_param(state, client, allow_create_underway_fallback=True)
+        if retry_refresh.get('status') == 'success':
+            debug_payload['refreshPrepay'] = retry_refresh.get('debug')
+            second_pay = client.pay(state.context['prepay_param'])
+            debug_payload['secondPay'] = second_pay.get('raw')
+            if second_pay.get('ok'):
+                state.current_step = 6
+                state.completed = True
+                return self._success(state, '步骤 5 完成：支付成功，设备已启动。', debug_payload)
+            final_error = second_pay
+        else:
+            debug_payload['refreshPrepay'] = retry_refresh.get('debug')
+            final_error = first_pay
+
+        return self._error(
+            final_error.get('error_type', 'request_failed'),
+            final_error.get('msg', '支付失败'),
+            state,
+            debug_payload,
+            code=final_error.get('code'),
+            data=final_error.get('data'),
+        )
 
     def _refresh_prepay_param(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import requests
@@ -19,6 +20,10 @@ from config import (
 
 
 class HaierClient:
+    WASHER_CATEGORY_CODE = '00'
+    DRYER_CATEGORY_CODE = '02'
+    MODE_VARIANT_SCALE = 1000
+
     def __init__(self, token: str, timeout: float = DEFAULT_TIMEOUT, retry: int = DEFAULT_RETRY):
         self.token = token.strip()
         self.timeout = timeout
@@ -156,26 +161,208 @@ class HaierClient:
         return self._request('POST', '/goods/last/runInfo', json={'goodsId': int(goods_id), 'categoryCode': category_code})
 
     def goods_verify(self, goods_id: int | str, category_code: str = '00') -> Dict[str, Any]:
-        return self._request('POST', '/goods/verify', json={'goodsId': int(goods_id), 'categoryCode': category_code})
+        result = self._request('POST', '/goods/verify', json={'goodsId': int(goods_id), 'categoryCode': category_code})
+        if not result.get('ok'):
+            return result
 
-    def create_scan_order(self, goods_id: str, mode_id: int, hash_key: str) -> Dict[str, Any]:
-        payload = {
-            'optionalInfo': {},
-            'purchaseList': [
-                {
-                    'goodsId': str(goods_id),
-                    'goodsItemId': int(mode_id),
-                    'soldType': 1,
-                    'amount': 1,
-                    'num': 1,
-                }
-            ],
+        data = result.get('data') or {}
+        if data.get('isSuccess') is not True:
+            return {
+                'ok': False,
+                'error_type': 'business',
+                'msg': data.get('msg') or result.get('msg') or '验单未通过，暂时无法继续支付。',
+                'code': result.get('code'),
+                'data': data,
+                'raw': result.get('raw'),
+            }
+        return result
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        if value in (None, ''):
+            return None
+        try:
+            normalized = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+        return normalized if normalized > 0 else None
+
+    @classmethod
+    def encode_mode_selection(cls, goods_item_id: Any, duration: Any) -> int:
+        goods_item = cls._coerce_positive_int(goods_item_id)
+        duration_value = cls._coerce_positive_int(duration)
+        if goods_item is None or duration_value is None:
+            raise ValueError('goods_item_id and duration must be positive integers')
+        return -((goods_item * cls.MODE_VARIANT_SCALE) + duration_value)
+
+    @classmethod
+    def decode_mode_selection(cls, mode_id: Any) -> tuple[int, int | None]:
+        try:
+            numeric_mode_id = int(mode_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('模式编号无效') from exc
+
+        if numeric_mode_id >= 0:
+            return numeric_mode_id, None
+
+        encoded = abs(numeric_mode_id)
+        goods_item_id = encoded // cls.MODE_VARIANT_SCALE
+        duration = encoded % cls.MODE_VARIANT_SCALE
+        if goods_item_id <= 0 or duration <= 0:
+            raise ValueError('模式编号无效')
+        return goods_item_id, duration
+
+    @classmethod
+    def extract_mode_durations(cls, mode_item: Dict[str, Any]) -> list[int]:
+        if not isinstance(mode_item, dict):
+            return []
+
+        durations: set[int] = set()
+        ext_items = ((mode_item.get('extAttrDto') or {}).get('items') or [])
+        for item in ext_items:
+            if not isinstance(item, dict):
+                continue
+            duration = cls._coerce_positive_int(item.get('unitAmount') or item.get('unit'))
+            if duration is not None:
+                durations.add(duration)
+
+        fallback_duration = cls._coerce_positive_int(mode_item.get('unitAmount') or mode_item.get('unit'))
+        if fallback_duration is not None:
+            durations.add(fallback_duration)
+
+        return sorted(durations)
+
+    @classmethod
+    def extract_category_code(cls, payload: Dict[str, Any] | None, default: str = WASHER_CATEGORY_CODE) -> str:
+        if not isinstance(payload, dict):
+            return default
+
+        candidates = [
+            payload.get('categoryCode'),
+            payload.get('deviceCategory'),
+        ]
+
+        order_item = (payload.get('orderItemList') or [{}])[0]
+        if isinstance(order_item, dict):
+            candidates.extend(
+                [
+                    order_item.get('categoryCode'),
+                    ((order_item.get('goodsItemInfoDto') or {}).get('categoryCode')),
+                ]
+            )
+            goods_item_info = order_item.get('goodsItemInfo')
+            if isinstance(goods_item_info, str):
+                try:
+                    parsed_goods_item_info = json.loads(goods_item_info)
+                except ValueError:
+                    parsed_goods_item_info = {}
+                if isinstance(parsed_goods_item_info, dict):
+                    candidates.append(parsed_goods_item_info.get('categoryCode'))
+
+        device_info_list = ((payload.get('uniqueInfo') or {}).get('deviceInfoList') or [])
+        if device_info_list and isinstance(device_info_list[0], dict):
+            candidates.append(device_info_list[0].get('deviceCategory'))
+
+        for candidate in candidates:
+            text = str(candidate or '').strip()
+            if text:
+                return text
+        return default
+
+    @classmethod
+    def build_scan_order_payload(cls, goods_detail: Dict[str, Any], mode_id: int, hash_key: str) -> Dict[str, Any]:
+        if not isinstance(goods_detail, dict) or not goods_detail:
+            raise ValueError('设备详情为空，无法创建扫码订单。')
+
+        goods_id = goods_detail.get('id') or goods_detail.get('goodsId')
+        goods_id_text = str(goods_id or '').strip()
+        if not goods_id_text:
+            raise ValueError('设备详情缺少 goodsId，无法创建扫码订单。')
+
+        resolved_mode_id, requested_duration = cls.decode_mode_selection(mode_id)
+        mode_item = next(
+            (
+                item
+                for item in (goods_detail.get('items') or [])
+                if isinstance(item, dict) and cls._coerce_positive_int(item.get('id')) == resolved_mode_id
+            ),
+            None,
+        )
+        if not mode_item:
+            raise ValueError('在设备详情中未找到所选模式。')
+
+        category_code = cls.extract_category_code(goods_detail)
+        if category_code == cls.DRYER_CATEGORY_CODE:
+            durations = cls.extract_mode_durations(mode_item)
+            if requested_duration is not None:
+                if requested_duration not in durations:
+                    raise ValueError(f'烘干模式不支持 {requested_duration} 分钟。')
+                duration = requested_duration
+            else:
+                duration = max(durations) if durations else None
+            if duration is None:
+                raise ValueError('烘干模式缺少可解析时长，无法创建订单。')
+
+            purchase_item = {
+                'goodsId': goods_id_text,
+                'goodsItemId': resolved_mode_id,
+                'soldType': 2,
+                'amount': duration,
+                'unit': duration,
+                'num': duration,
+            }
+            optional_info: Dict[str, Any] = {'deviceInfo': {}}
+        else:
+            purchase_item = {
+                'goodsId': goods_id_text,
+                'goodsItemId': resolved_mode_id,
+                'soldType': 1,
+                'amount': 1,
+                'num': 1,
+            }
+            optional_info = {}
+
+        return {
+            'optionalInfo': optional_info,
+            'purchaseList': [purchase_item],
             'hashKey': hash_key,
         }
+
+    def create_scan_order(
+        self,
+        goods_id: str,
+        mode_id: int,
+        hash_key: str,
+        *,
+        goods_detail: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        detail = goods_detail
+        if detail is None:
+            detail_res = self.goods_details(goods_id)
+            if not detail_res.get('ok'):
+                return detail_res
+            detail = detail_res.get('data') or {}
+
+        try:
+            payload = self.build_scan_order_payload(detail or {}, mode_id, hash_key)
+        except ValueError as exc:
+            return {
+                'ok': False,
+                'error_type': 'invalid_mode',
+                'msg': str(exc),
+                'raw': detail,
+            }
         return self._request('POST', '/trade/scanOrderCreate', json=payload)
 
-    def create_order(self, goods_id: str, mode_id: int, hash_key: str) -> Dict[str, Any]:
-        return self.create_scan_order(goods_id=goods_id, mode_id=mode_id, hash_key=hash_key)
+    def create_order(
+        self,
+        goods_id: str,
+        mode_id: int,
+        hash_key: str,
+        *,
+        goods_detail: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return self.create_scan_order(goods_id=goods_id, mode_id=mode_id, hash_key=hash_key, goods_detail=goods_detail)
 
     def create_lock_order(self, goods_id: str, mode_id: int, hash_key: str = '', reserve_method: Any = None) -> Dict[str, Any]:
         payload = {

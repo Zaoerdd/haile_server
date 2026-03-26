@@ -80,15 +80,66 @@ def find_scan_mapping(machine_name: str, machine_code: str | None = None) -> Dic
     return None
 
 
-def normalize_mode(item: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        'id': item.get('id'),
-        'label': item.get('name'),
+def normalize_mode(
+    item: Dict[str, Any],
+    *,
+    mode_id: Any | None = None,
+    label: str | None = None,
+    unit: Any | None = None,
+    duration: int | None = None,
+    display_text: str | None = None,
+) -> Dict[str, Any]:
+    resolved_label = label if label is not None else str(item.get('name') or '未命名模式')
+    resolved_unit = item.get('unit', '--') if unit is None else unit
+    resolved_price = item.get('price', '0.00')
+    payload = {
+        'id': item.get('id') if mode_id is None else mode_id,
+        'label': resolved_label,
         'feature': item.get('feature') or '',
-        'price': item.get('price', '0.00'),
-        'unit': item.get('unit', '--'),
-        'displayText': f"{item.get('name')} · {item.get('unit', '--')} 分钟 · ￥{item.get('price', '0.00')}",
+        'price': resolved_price,
+        'unit': resolved_unit,
+        'displayText': display_text or f"{resolved_label} · {resolved_unit} 分钟 · ￥{resolved_price}",
+        'goodsItemId': item.get('id'),
     }
+    if duration is not None:
+        payload['duration'] = duration
+    return payload
+
+
+def normalize_scan_modes(detail: Dict[str, Any]) -> list[Dict[str, Any]]:
+    category_code = str(detail.get('categoryCode') or '')
+    items = detail.get('items') or []
+    modes: list[Dict[str, Any]] = []
+
+    for item in items:
+        if not isinstance(item, dict) or item.get('id') is None:
+            continue
+
+        if category_code == HaierClient.DRYER_CATEGORY_CODE:
+            durations = HaierClient.extract_mode_durations(item)
+            if durations:
+                base_label = str(item.get('name') or '未命名模式')
+                price = item.get('price', '0.00')
+                for duration in durations:
+                    try:
+                        encoded_mode_id = HaierClient.encode_mode_selection(item.get('id'), duration)
+                    except ValueError:
+                        continue
+                    modes.append(
+                        normalize_mode(
+                            item,
+                            mode_id=encoded_mode_id,
+                            label=f'{base_label} {duration}分钟',
+                            unit=duration,
+                            duration=duration,
+                            display_text=f'{base_label} · {duration} 分钟 · ￥{price}',
+                        )
+                    )
+                continue
+
+        modes.append(normalize_mode(item))
+
+    return modes
 
 
 def normalize_room(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -571,7 +622,26 @@ def cancel_order(order_no: str):
     client = HaierClient(token)
     res = client.cancel_order(order_no)
     if not res.get('ok'):
-        return json_error(res.get('msg') or '取消订单失败。', error_type=res.get('error_type', 'order_cancel_failed'), debug=res.get('raw'))
+        synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_closed=True, until_not_pending=True)
+        if synced_detail and reservation_service._classify_order_detail(synced_detail) == 'closed':
+            reservation_service.handle_manual_order_closed(order_no, '取消', synced_detail)
+            workflow_manager.sync_process_for_order(token, order_no)
+            return jsonify(
+                {
+                    'status': 'success',
+                    'msg': '订单已取消。',
+                    'order': normalize_order_detail(synced_detail),
+                    'debug': {
+                        'action': res.get('raw'),
+                        'orderDetail': detail_debug,
+                    },
+                }
+            )
+        return json_error(
+            res.get('msg') or '取消订单失败。',
+            error_type=res.get('error_type', 'order_cancel_failed'),
+            debug={'action': res.get('raw'), 'orderDetail': detail_debug},
+        )
     synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_not_pending=True)
     reservation_service.handle_manual_order_closed(order_no, '取消', synced_detail)
     workflow_manager.sync_process_for_order(token, order_no)
@@ -598,7 +668,26 @@ def finish_order(order_no: str):
     client = HaierClient(token)
     res = client.finish_order(order_no)
     if not res.get('ok'):
-        return json_error(res.get('msg') or '结束订单失败。', error_type=res.get('error_type', 'order_finish_failed'), debug=res.get('raw'))
+        synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_closed=True, until_not_pending=True)
+        if synced_detail and reservation_service._classify_order_detail(synced_detail) in {'completed', 'closed'}:
+            reservation_service.handle_manual_order_closed(order_no, '结束', synced_detail)
+            workflow_manager.sync_process_for_order(token, order_no)
+            return jsonify(
+                {
+                    'status': 'success',
+                    'msg': '订单已结束。',
+                    'order': normalize_order_detail(synced_detail),
+                    'debug': {
+                        'action': res.get('raw'),
+                        'orderDetail': detail_debug,
+                    },
+                }
+            )
+        return json_error(
+            res.get('msg') or '结束订单失败。',
+            error_type=res.get('error_type', 'order_finish_failed'),
+            debug={'action': res.get('raw'), 'orderDetail': detail_debug},
+        )
     synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_not_pending=True)
     reservation_service.handle_manual_order_closed(order_no, '结束', synced_detail)
     workflow_manager.sync_process_for_order(token, order_no)
@@ -719,9 +808,17 @@ def get_modes():
     if not detail_res.get('ok'):
         return json_error(detail_res.get('msg') or '获取机器详情失败。', error_type=detail_res.get('error_type', 'machine_detail_failed'), debug=detail_res.get('raw'))
 
-    items = (detail_res.get('data') or {}).get('items', [])
-    modes = [normalize_mode(item) for item in items if isinstance(item, dict) and item.get('id') is not None]
-    return jsonify({'status': 'success', 'modes': modes, 'goodsId': goods_id, 'debug': detail_res.get('raw')})
+    detail = detail_res.get('data') or {}
+    modes = normalize_scan_modes(detail if isinstance(detail, dict) else {})
+    return jsonify(
+        {
+            'status': 'success',
+            'modes': modes,
+            'goodsId': goods_id,
+            'categoryCode': detail.get('categoryCode') if isinstance(detail, dict) else '',
+            'debug': detail_res.get('raw'),
+        }
+    )
 
 
 @app.route('/api/process/start', methods=['POST'])

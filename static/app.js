@@ -2033,11 +2033,20 @@ async function handleOrderClick(event) {
     if (!(await showConfirmDialog(`确定取消订单 ${orderNo} 吗？`))) {
         return;
     }
-    const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});
-    showToastMessage(data.msg || '订单已取消。');
-    applyOrderDetail(orderNo, data.order);
-    await refreshSingleOrder(orderNo, data.order);
+    let cancelError = null;
+    let cancelData = null;
+    try {
+        cancelData = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});
+        showToastMessage(cancelData.msg || '订单已取消。');
+        applyOrderDetail(orderNo, cancelData.order);
+    } catch (error) {
+        cancelError = error;
+    }
+    await refreshSingleOrder(orderNo);
     await loadActiveProcesses();
+    if (cancelError) {
+        handleRequestError(cancelError, '取消订单失败。', true);
+    }
 }
 
 async function refreshSingleOrder(orderNo, initialDetail = null) {
