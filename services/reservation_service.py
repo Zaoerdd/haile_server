@@ -366,6 +366,43 @@ class ReservationService:
 
         return current
 
+    def _ensure_final_pending_order(
+        self,
+        client: HaierClient,
+        order_no: str,
+        detail: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any] | None, Dict[str, Any], str | None]:
+        normalized_order_no = str(order_no or '').strip()
+        current = detail if isinstance(detail, dict) else {}
+        debug: Dict[str, Any] = {'initialDetail': current}
+        if not normalized_order_no:
+            return False, None, debug, '缺少 orderNo，无法推进到待付款状态。'
+
+        if self._classify_order_detail(current) != 'pending':
+            return False, current if isinstance(current, dict) else None, debug, '订单当前不是待支付状态。'
+
+        if not self._is_final_pending_stage(current):
+            place_res = client.place_clothes(normalized_order_no)
+            debug['placeClothes'] = place_res.get('raw')
+            if not place_res.get('ok'):
+                detail_res = client.order_detail(normalized_order_no)
+                debug['orderDetail'] = detail_res.get('raw')
+                if not detail_res.get('ok'):
+                    return False, current if isinstance(current, dict) else None, debug, place_res.get('msg') or '自动放入衣服失败。'
+                current = detail_res.get('data') or {}
+            else:
+                detail_res = client.order_detail(normalized_order_no)
+                debug['orderDetail'] = detail_res.get('raw')
+                if not detail_res.get('ok'):
+                    return False, current if isinstance(current, dict) else None, debug, detail_res.get('msg') or '读取订单详情失败。'
+                current = detail_res.get('data') or {}
+
+        current = self._settle_pending_order_detail(client, normalized_order_no, current)
+        debug['settledDetail'] = current
+        if self._classify_order_detail(current) != 'pending' or not self._is_final_pending_stage(current):
+            return False, current if isinstance(current, dict) else None, debug, '订单未能进入最终待付款状态。'
+        return True, current, debug, None
+
     def sync_task_order_snapshot(self, token: str, order_no: str) -> None:
         normalized_order_no = str(order_no or '').strip()
         if not token or not normalized_order_no:
@@ -376,7 +413,14 @@ class ReservationService:
         if not detail_res.get('ok'):
             return
 
-        detail = self._settle_pending_order_detail(client, normalized_order_no, detail_res.get('data') or {})
+        detail = detail_res.get('data') or {}
+        if self._classify_order_detail(detail) == 'pending':
+            ok, ensured_detail, _, _ = self._ensure_final_pending_order(client, normalized_order_no, detail)
+            if not ok or not ensured_detail:
+                return
+            detail = ensured_detail
+        else:
+            detail = self._settle_pending_order_detail(client, normalized_order_no, detail)
         snapshot = self._normalize_current_order(detail)
         classification = self._classify_order_detail(detail)
         rows = database.fetch_all(
@@ -451,17 +495,37 @@ class ReservationService:
         client = HaierClient(token) if token else None
         for task in tasks:
             current_order = self._deserialize_current_order(task.current_order_snapshot)
-            if client and task.active_order_no and current_order and self._classify_order_detail(current_order) == 'pending' and not self._is_final_pending_stage(current_order):
-                settled_detail = self._settle_pending_order_detail(client, task.active_order_no, current_order)
-                settled_snapshot = self._normalize_current_order(settled_detail)
-                task.current_order_snapshot = self._serialize_current_order(settled_snapshot)
-                current_order = settled_snapshot
-                self._update_task(
-                    task.id,
-                    current_order_snapshot=task.current_order_snapshot,
-                    last_checked_at=to_iso(now_local()) or '',
-                    last_error=None,
-                )
+            if client and task.active_order_no and current_order and self._classify_order_detail(current_order) == 'pending':
+                if not self._is_final_pending_stage(current_order):
+                    ok, ensured_detail, _, error_msg = self._ensure_final_pending_order(client, task.active_order_no, current_order)
+                    if ok and ensured_detail:
+                        settled_snapshot = self._normalize_current_order(ensured_detail)
+                        task.current_order_snapshot = self._serialize_current_order(settled_snapshot)
+                        current_order = settled_snapshot
+                        self._update_task(
+                            task.id,
+                            current_order_snapshot=task.current_order_snapshot,
+                            last_checked_at=to_iso(now_local()) or '',
+                            last_error=None,
+                        )
+                    else:
+                        current_order = None
+                        self._update_task(
+                            task.id,
+                            last_checked_at=to_iso(now_local()) or '',
+                            last_error=error_msg or '订单尚未进入最终待付款状态。',
+                        )
+                else:
+                    settled_detail = self._settle_pending_order_detail(client, task.active_order_no, current_order)
+                    settled_snapshot = self._normalize_current_order(settled_detail)
+                    task.current_order_snapshot = self._serialize_current_order(settled_snapshot)
+                    current_order = settled_snapshot
+                    self._update_task(
+                        task.id,
+                        current_order_snapshot=task.current_order_snapshot,
+                        last_checked_at=to_iso(now_local()) or '',
+                        last_error=None,
+                    )
             item = task.to_dict(self._fetch_last_event(task.id))
             item['processId'] = self._find_active_process_id(task.active_order_no)
             item['currentOrder'] = current_order
@@ -721,11 +785,14 @@ class ReservationService:
             detail_res = client.order_detail(order_no)
             if not detail_res.get('ok'):
                 continue
-            detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+            detail = detail_res.get('data') or {}
             if self._classify_order_detail(detail) != 'pending':
                 continue
+            ok, ensured_detail, _, _ = self._ensure_final_pending_order(client, order_no, detail)
+            if not ok or not ensured_detail:
+                continue
             sort_key = str(order.get('updateTime') or order.get('gmtModified') or order.get('createTime') or '')
-            candidates.append((sort_key, order_no, detail))
+            candidates.append((sort_key, order_no, ensured_detail))
 
         if not candidates:
             return None
@@ -764,7 +831,9 @@ class ReservationService:
         detail_res = client.order_detail(order_no)
         if not detail_res.get('ok'):
             return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
-        detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+        ok, detail, debug, error_msg = self._ensure_final_pending_order(client, order_no, detail_res.get('data') or {})
+        if not ok or not detail:
+            return False, error_msg or '订单未能进入最终待付款状态。', debug, 'failed'
         return True, order_no, detail, 'created'
 
     def _classify_order_detail(self, detail: Dict[str, Any]) -> str:
@@ -807,6 +876,7 @@ class ReservationService:
         if not token:
             return {'processed': 0, 'created': 0, 'adopted': 0, 'recreated': 0, 'completed': 0}
 
+        client = HaierClient(token)
         now = now_local()
         created_count = 0
         adopted_count = 0
@@ -867,10 +937,10 @@ class ReservationService:
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
-                        '\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002',
+                        '检测到当前机器已有待支付订单，已接管当前订单。',
                         {'orderNo': order_no, 'processId': process_id},
                     )
-                    self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
+                    self._notify('预约已接管现有订单', f'{task.title}\n订单号：{order_no}')
                     continue
                 created_count += 1
                 self._update_task(
@@ -882,7 +952,7 @@ class ReservationService:
                     last_run_at=to_iso(now),
                     last_error=None,
                 )
-                self._record_event(task.id, 'order_created', '预约订单已创建并进入保单窗口。', {'orderNo': order_no, 'processId': process_id})
+                self._record_event(task.id, 'order_created', '预约订单已创建，并已自动放入衣物进入待付款状态。', {'orderNo': order_no, 'processId': process_id})
                 self._notify('预约订单已创建', f'{task.title}\n订单号：{order_no}')
                 continue
 
@@ -891,6 +961,32 @@ class ReservationService:
             self._update_task(task.id, last_checked_at=to_iso(now), last_error=None)
 
             if classification == 'pending':
+                if task.active_order_no and snapshot and not self._is_final_pending_stage(snapshot):
+                    ok, ensured_detail, debug, error_msg = self._ensure_final_pending_order(client, task.active_order_no, snapshot)
+                    if not ok or not ensured_detail:
+                        self._update_task(
+                            task.id,
+                            active_order_no=None,
+                            current_order_snapshot=None,
+                            status='scheduled',
+                            last_error=error_msg or '订单未能进入最终待付款状态。',
+                            last_checked_at=to_iso(now),
+                        )
+                        self._record_event(
+                            task.id,
+                            'order_auto_place_failed',
+                            error_msg or '订单未能进入最终待付款状态。',
+                            {'orderNo': task.active_order_no, 'detail': debug},
+                        )
+                        continue
+                    snapshot = self._normalize_current_order(ensured_detail)
+                    classification = self._classify_order_detail(ensured_detail)
+                    self._update_task(
+                        task.id,
+                        current_order_snapshot=self._serialize_current_order(snapshot),
+                        last_checked_at=to_iso(now),
+                        last_error=None,
+                    )
                 if task.status != 'holding':
                     self._update_task(task.id, status='holding')
                 invalid_at = self._get_snapshot_invalid_at(snapshot)
@@ -944,10 +1040,10 @@ class ReservationService:
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
-                        '\u539f\u8ba2\u5355\u5931\u6548\u540e\uff0c\u68c0\u6d4b\u5230\u5f53\u524d\u673a\u5668\u5df2\u6709\u65b0\u7684\u5f85\u652f\u4ed8\u8ba2\u5355\uff0c\u5df2\u63a5\u7ba1\u5f53\u524d\u8ba2\u5355\u3002',
+                        '原订单失效后，检测到当前机器已有新的待支付订单，已接管当前订单。',
                         {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
                     )
-                    self._notify('\u9884\u7ea6\u5df2\u63a5\u7ba1\u73b0\u6709\u8ba2\u5355', f'{task.title}\n\u8ba2\u5355\u53f7\uff1a{order_no}')
+                    self._notify('预约已接管现有订单', f'{task.title}\n订单号：{order_no}')
                     continue
                 recreated_count += 1
                 self._update_task(
@@ -959,12 +1055,21 @@ class ReservationService:
                     last_run_at=to_iso(now),
                     last_error=None,
                 )
-                self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建。', {'orderNo': order_no, 'detail': recreate_detail, 'processId': process_id})
+                self._record_event(task.id, 'order_recreated', '检测到订单失效，已自动补建并进入待付款状态。', {'orderNo': order_no, 'detail': recreate_detail, 'processId': process_id})
                 self._notify('预约订单已补建', f'{task.title}\n新订单号：{order_no}')
                 continue
 
             self._update_task(task.id, last_error='订单状态未知，继续保留当前预约任务。', last_checked_at=to_iso(now))
-            self._record_event(task.id, 'order_unknown_state', '订单状态未知，继续保留当前预约任务。', {'orderNo': task.active_order_no, 'state': detail.get('state'), 'stateDesc': detail.get('stateDesc')})
+            self._record_event(
+                task.id,
+                'order_unknown_state',
+                '订单状态未知，继续保留当前预约任务。',
+                {
+                    'orderNo': task.active_order_no,
+                    'state': (snapshot or {}).get('state'),
+                    'stateDesc': (snapshot or {}).get('stateDesc'),
+                },
+            )
 
         return {
             'processed': len(rows),

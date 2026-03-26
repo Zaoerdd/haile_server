@@ -229,7 +229,7 @@ class WorkflowManager:
 
         message = '流程已重置。'
         if cleanup_result and cleanup_result.get('cleanedOrders'):
-            message = f"流程已重置，并自动结束 {len(cleanup_result['cleanedOrders'])} 笔云端订单。"
+            message = f"流程已重置，并自动结束了 {len(cleanup_result['cleanedOrders'])} 笔云端订单。"
 
         payload: Dict[str, Any] = {'status': 'success', 'msg': message}
         if cleanup_result:
@@ -658,8 +658,112 @@ class WorkflowManager:
         state_desc = str(detail.get('stateDesc') or '')
         can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
         if can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc:
-            return 5
+            return 4
         return 3
+
+    def _is_final_pending_stage(self, detail: Dict[str, Any]) -> bool:
+        if self._classify_order_detail(detail) != 'pending':
+            return False
+        page_code = str(detail.get('pageCode') or '')
+        state_desc = str(detail.get('stateDesc') or '')
+        can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
+        return can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc
+
+    def _settle_pending_order_detail(
+        self,
+        client: HaierClient,
+        order_no: str,
+        detail: Dict[str, Any],
+        *,
+        max_checks: int = 2,
+    ) -> Dict[str, Any]:
+        normalized_order_no = str(order_no or '').strip()
+        current = detail if isinstance(detail, dict) else {}
+        if not normalized_order_no:
+            return current
+
+        checks = 0
+        while checks < max_checks and self._classify_order_detail(current) == 'pending' and not self._is_final_pending_stage(current):
+            next_res = client.order_detail(normalized_order_no)
+            if not next_res.get('ok'):
+                return current
+            next_detail = next_res.get('data') or {}
+            if not isinstance(next_detail, dict) or not next_detail:
+                return current
+            current = next_detail
+            checks += 1
+
+        if self._is_final_pending_stage(current):
+            final_res = client.order_detail(normalized_order_no)
+            if final_res.get('ok'):
+                final_detail = final_res.get('data') or {}
+                if isinstance(final_detail, dict) and final_detail:
+                    current = final_detail
+
+        return current
+
+    def _advance_to_payment_stage(
+        self,
+        state: ProcessState,
+        client: HaierClient,
+        *,
+        success_msg: str,
+        debug: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        order_no = str(state.context.get('order_no') or '').strip()
+        if not order_no:
+            return self._error('invalid_state', '缺少 orderNo，请重新开始流程。', state)
+
+        debug_payload = dict(debug or {})
+        detail: Dict[str, Any] = {}
+        place_res = client.place_clothes(order_no)
+        debug_payload['placeClothes'] = place_res.get('raw')
+        if not place_res.get('ok'):
+            detail_res = client.order_detail(order_no)
+            debug_payload['orderDetail'] = detail_res.get('raw')
+            if detail_res.get('ok'):
+                detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+                debug_payload['settledDetail'] = detail
+                if self._classify_order_detail(detail) == 'pending' and self._is_final_pending_stage(detail):
+                    self._hydrate_context_from_detail(state, detail)
+                    state.current_step = 4
+                    state.completed = False
+                    state.terminated = False
+                    state.blocked_reason = None
+                    return self._success(state, success_msg, debug_payload)
+            return self._error_result(place_res, state)
+
+        detail_res = client.order_detail(order_no)
+        debug_payload['orderDetail'] = detail_res.get('raw')
+        if not detail_res.get('ok'):
+            return self._error_result(detail_res, state)
+
+        detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+        debug_payload['settledDetail'] = detail
+        classification = self._classify_order_detail(detail)
+        self._hydrate_context_from_detail(state, detail)
+
+        if classification == 'closed':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '订单已关闭或失效，流程无法继续。'
+            return self._error('process_blocked', state.blocked_reason, state, debug_payload)
+
+        if classification in {'running', 'completed'}:
+            state.completed = True
+            state.terminated = False
+            state.current_step = 6
+            state.blocked_reason = None
+            return self._success(state, '订单已支付并启动，流程已自动完成。', debug_payload)
+
+        if classification != 'pending' or not self._is_final_pending_stage(detail):
+            return self._error('order_not_ready', '订单未能进入最终待付款状态，请稍后重试。', state, debug_payload)
+
+        state.current_step = 4
+        state.completed = False
+        state.terminated = False
+        state.blocked_reason = None
+        return self._success(state, success_msg, debug_payload)
 
     def _apply_pending_detail_to_state(self, state: ProcessState, detail: Dict[str, Any]) -> None:
         self._hydrate_context_from_detail(state, detail)
@@ -735,15 +839,19 @@ class WorkflowManager:
         if not order_no:
             return self._error('invalid_response', '创建订单成功，但未返回 orderNo。', state, res.get('raw'))
         state.context['order_no'] = str(order_no)
-        state.current_step = 3
-        return self._success(state, '步骤 2 完成：订单已创建。', res.get('raw'))
+        return self._advance_to_payment_stage(
+            state,
+            client,
+            success_msg='步骤 2 完成：订单已创建，并已自动放入衣物进入待付款状态。',
+            debug={'createOrder': res.get('raw')},
+        )
 
     def _step_place_clothes(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
-        res = client.place_clothes(state.context['order_no'])
-        if not res.get('ok'):
-            return self._error_result(res, state)
-        state.current_step = 4
-        return self._success(state, '步骤 3 完成：已确认放衣。', res.get('raw'))
+        return self._advance_to_payment_stage(
+            state,
+            client,
+            success_msg='步骤 3 完成：已确认放衣并进入待付款状态。',
+        )
 
     def _step_prepare_payment(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
         create_res = client.create_underway(state.context['order_no'])
@@ -853,7 +961,7 @@ class WorkflowManager:
     def _build_start_message(self, cleanup_result: Dict[str, Any]) -> str:
         cleaned_count = len(cleanup_result.get('cleanedOrders') or [])
         if cleaned_count:
-            return f'流程已创建，并自动结束 {cleaned_count} 笔该机器的遗留订单。'
+            return f'流程已创建，并自动结束了 {cleaned_count} 笔该机器的遗留订单。'
         return '流程已创建。'
 
     def _compact_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
