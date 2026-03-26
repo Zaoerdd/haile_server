@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, Literal
@@ -403,6 +404,48 @@ class ReservationService:
             return False, current if isinstance(current, dict) else None, debug, '订单未能进入最终待付款状态。'
         return True, current, debug, None
 
+    def _retry_order_detail(
+        self,
+        client: HaierClient,
+        order_no: str,
+        *,
+        attempts: int = 3,
+        delay_seconds: float = 0.35,
+        until_closed: bool = False,
+        until_not_pending: bool = False,
+    ) -> Dict[str, Any] | None:
+        normalized_order_no = str(order_no or '').strip()
+        if not normalized_order_no:
+            return None
+
+        max_attempts = max(1, int(attempts))
+        last_detail: Dict[str, Any] | None = None
+        for attempt in range(max_attempts):
+            detail_res = client.order_detail(normalized_order_no)
+            if detail_res.get('ok'):
+                detail = detail_res.get('data') or {}
+                if isinstance(detail, dict) and detail:
+                    last_detail = detail
+                    classification = self._classify_order_detail(detail)
+                    if until_closed and classification == 'closed':
+                        return detail
+                    if until_not_pending and classification != 'pending':
+                        return detail
+                    if not until_closed and not until_not_pending:
+                        return detail
+            if attempt < max_attempts - 1:
+                time.sleep(delay_seconds)
+        return last_detail
+
+    def _sync_workflow_process(self, token: str, order_no: str) -> None:
+        normalized_order_no = str(order_no or '').strip()
+        if not token or not normalized_order_no:
+            return
+        try:
+            self._get_workflow_manager().sync_process_for_order(token, normalized_order_no)
+        except Exception:  # noqa: BLE001
+            return
+
     def sync_task_order_snapshot(self, token: str, order_no: str) -> None:
         normalized_order_no = str(order_no or '').strip()
         if not token or not normalized_order_no:
@@ -701,7 +744,9 @@ class ReservationService:
         self._record_event(task_id, 'task_deleted', '预约任务已删除。')
         return {'id': task_id, 'status': 'deleted'}
 
-    def handle_manual_order_closed(self, order_no: str, action: str) -> None:
+    def handle_manual_order_closed(self, order_no: str, action: str, detail: Dict[str, Any] | None = None) -> None:
+        snapshot = self._serialize_current_order(self._normalize_current_order(detail or {})) if detail else None
+        updated_at = to_iso(now_local()) or ''
         rows = database.fetch_all(
             '''
             SELECT *
@@ -717,10 +762,10 @@ class ReservationService:
             database.execute(
                 '''
                 UPDATE reservation_tasks
-                SET status = 'paused', last_error = ?, current_order_snapshot = NULL, updated_at = ?
+                SET status = 'paused', last_error = ?, current_order_snapshot = ?, last_checked_at = ?, updated_at = ?
                 WHERE id = ?
                 ''',
-                (reason, to_iso(now_local()) or '', task.id),
+                (reason, snapshot, updated_at, updated_at, task.id),
             )
             self._record_event(task.id, 'manual_order_closed', reason, {'orderNo': order_no})
             self._notify('预约任务已暂停', f'{task.title}\n{reason}')
@@ -769,7 +814,9 @@ class ReservationService:
         client: HaierClient,
         qr_code: str,
         scan_data: Dict[str, Any],
+        excluded_order_nos: set[str] | None = None,
     ) -> tuple[str, Dict[str, Any]] | None:
+        excluded = {str(item).strip() for item in (excluded_order_nos or set()) if str(item).strip()}
         orders_res = client.get_underway_orders()
         if not orders_res.get('ok'):
             return None
@@ -781,6 +828,8 @@ class ReservationService:
                 continue
             order_no = str(order.get('orderNo') or '').strip()
             if not order_no:
+                continue
+            if order_no in excluded:
                 continue
             detail_res = client.order_detail(order_no)
             if not detail_res.get('ok'):
@@ -801,7 +850,13 @@ class ReservationService:
         _, order_no, detail = candidates[0]
         return order_no, detail
 
-    def _create_pending_order(self, task: ReservationTask, token: str) -> tuple[bool, str, Dict[str, Any] | None, str]:
+    def _create_pending_order(
+        self,
+        task: ReservationTask,
+        token: str,
+        *,
+        excluded_order_nos: set[str] | None = None,
+    ) -> tuple[bool, str, Dict[str, Any] | None, str]:
         if not task.qr_code:
             return False, '缺少二维码编号，无法创建预约订单。', None, 'failed'
         client = HaierClient(token)
@@ -812,18 +867,19 @@ class ReservationService:
         goods_id = scan_data.get('goodsId')
         if not goods_id:
             return False, '扫码结果缺少 goodsId。', scan_res.get('raw'), 'failed'
-        existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data)
+        existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
         if existing_order:
             order_no, detail = existing_order
             return True, order_no, detail, 'adopted'
         create_res = client.create_scan_order(goods_id=str(goods_id), mode_id=task.mode_id, hash_key=str(scan_data.get('activityHashKey') or ''))
         if not create_res.get('ok'):
             if create_res.get('error_type') == 'business':
-                existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data)
+                existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
                 if existing_order:
                     order_no, detail = existing_order
                     return True, order_no, detail, 'adopted'
-            return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), 'failed'
+                return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), 'failed_business'
+            return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), f"failed_{create_res.get('error_type') or 'unknown'}"
         order_data = create_res.get('data') or {}
         order_no = str(order_data.get('orderNo') or '').strip()
         if not order_no:
@@ -958,6 +1014,7 @@ class ReservationService:
 
             snapshot = self._deserialize_current_order(task.current_order_snapshot)
             classification = self._classify_order_detail(snapshot or {})
+            expired_pending = False
             self._update_task(task.id, last_checked_at=to_iso(now), last_error=None)
 
             if classification == 'pending':
@@ -994,7 +1051,122 @@ class ReservationService:
                     continue
                 if invalid_at is None and now <= hold_until:
                     continue
-                classification = 'closed'
+                expired_pending = True
+                refreshed_detail = self._retry_order_detail(client, task.active_order_no)
+                if not refreshed_detail:
+                    self._update_task(
+                        task.id,
+                        current_order_snapshot=self._serialize_current_order(snapshot) if snapshot else None,
+                        last_checked_at=to_iso(now),
+                        last_error='订单已到补单时间，但刷新旧订单状态失败。',
+                    )
+                    self._record_event(
+                        task.id,
+                        'order_refresh_failed',
+                        '订单已到补单时间，但刷新旧订单状态失败。',
+                        {'orderNo': task.active_order_no},
+                    )
+                    continue
+                snapshot = self._normalize_current_order(refreshed_detail)
+                classification = self._classify_order_detail(refreshed_detail)
+                self._update_task(
+                    task.id,
+                    current_order_snapshot=self._serialize_current_order(snapshot),
+                    last_checked_at=to_iso(now),
+                    last_error=None,
+                )
+                if classification == 'pending':
+                    invalid_at = self._get_snapshot_invalid_at(snapshot)
+                    if invalid_at and now < invalid_at:
+                        expired_pending = False
+                        continue
+                    if invalid_at is None and now <= hold_until:
+                        expired_pending = False
+                        continue
+
+            if classification == 'pending' and expired_pending:
+                previous_order_no = str(task.active_order_no or '').strip()
+                ok, result, recreate_detail, source = self._create_pending_order(
+                    task,
+                    token,
+                    excluded_order_nos={previous_order_no} if previous_order_no else None,
+                )
+                if not ok and previous_order_no and source == 'failed_business':
+                    cancel_res = client.cancel_order(previous_order_no)
+                    refreshed_old_detail = self._retry_order_detail(client, previous_order_no, until_closed=True)
+                    if refreshed_old_detail:
+                        snapshot = self._normalize_current_order(refreshed_old_detail)
+                        classification = self._classify_order_detail(refreshed_old_detail)
+                        self._update_task(
+                            task.id,
+                            current_order_snapshot=self._serialize_current_order(snapshot),
+                            last_checked_at=to_iso(now),
+                            last_error=None,
+                        )
+                        self._sync_workflow_process(token, previous_order_no)
+                    if classification == 'closed':
+                        ok, result, recreate_detail, source = self._create_pending_order(
+                            task,
+                            token,
+                            excluded_order_nos={previous_order_no},
+                        )
+
+                if not ok:
+                    self._update_task(
+                        task.id,
+                        current_order_snapshot=self._serialize_current_order(snapshot) if snapshot else None,
+                        last_checked_at=to_iso(now),
+                        last_error=str(result),
+                    )
+                    self._record_event(
+                        task.id,
+                        'order_recreate_blocked',
+                        '旧订单未完全关闭，暂不补新单。',
+                        {'orderNo': previous_order_no, 'detail': recreate_detail, 'reason': str(result)},
+                    )
+                    continue
+
+                order_no = str(result)
+                current_order_snapshot = self._serialize_current_order(
+                    self._normalize_current_order(recreate_detail if isinstance(recreate_detail, dict) else {})
+                )
+                process_id = self._ensure_process_for_task(task, token, order_no, recreate_detail if isinstance(recreate_detail, dict) else None)
+                if source == 'adopted':
+                    adopted_count += 1
+                    self._update_task(
+                        task.id,
+                        status='holding',
+                        active_order_no=order_no,
+                        current_order_snapshot=current_order_snapshot,
+                        last_checked_at=to_iso(now),
+                        last_run_at=to_iso(now),
+                        last_error=None,
+                    )
+                    self._record_event(
+                        task.id,
+                        'existing_order_adopted',
+                        '旧订单失效后，接管了当前机器上的新待支付订单。',
+                        {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
+                    )
+                    continue
+
+                recreated_count += 1
+                self._update_task(
+                    task.id,
+                    status='holding',
+                    active_order_no=order_no,
+                    current_order_snapshot=current_order_snapshot,
+                    last_checked_at=to_iso(now),
+                    last_run_at=to_iso(now),
+                    last_error=None,
+                )
+                self._record_event(
+                    task.id,
+                    'order_recreated',
+                    '旧订单关闭后，已自动补建新订单并进入待付款状态。',
+                    {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
+                )
+                continue
 
             if classification in {'completed', 'running'}:
                 completed_count += 1

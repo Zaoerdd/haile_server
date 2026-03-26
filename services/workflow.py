@@ -358,6 +358,20 @@ class WorkflowManager:
                 items.append(payload)
         return items
 
+    def sync_process_for_order(self, token: str, order_no: str) -> Optional[Dict[str, Any]]:
+        normalized_order_no = str(order_no or '').strip()
+        if not normalized_order_no:
+            return None
+
+        state = self.get_by_order_no(normalized_order_no)
+        if not state:
+            return None
+
+        client = HaierClient(token)
+        result = self._sync_remote_order_state(state, client, fail_on_unavailable=False)
+        self._save_state(state)
+        return result
+
     def execute_next(self, process_id: str, token: str) -> Dict[str, Any]:
         state = self.get(process_id)
         if not state:
@@ -654,10 +668,7 @@ class WorkflowManager:
             state.context['hash_key'] = ''
 
     def _resolve_pending_step(self, detail: Dict[str, Any]) -> int:
-        page_code = str(detail.get('pageCode') or '')
-        state_desc = str(detail.get('stateDesc') or '')
-        can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
-        if can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc:
+        if self._is_final_pending_stage(detail):
             return 4
         return 3
 
@@ -665,9 +676,8 @@ class WorkflowManager:
         if self._classify_order_detail(detail) != 'pending':
             return False
         page_code = str(detail.get('pageCode') or '')
-        state_desc = str(detail.get('stateDesc') or '')
         can_pay = bool((detail.get('buttonSwitch') or {}).get('canPay'))
-        return can_pay or page_code == 'waiting_choose_ump' or '待支付' in state_desc
+        return can_pay or page_code == 'waiting_choose_ump'
 
     def _settle_pending_order_detail(
         self,
@@ -675,7 +685,7 @@ class WorkflowManager:
         order_no: str,
         detail: Dict[str, Any],
         *,
-        max_checks: int = 2,
+        max_checks: int = 4,
     ) -> Dict[str, Any]:
         normalized_order_no = str(order_no or '').strip()
         current = detail if isinstance(detail, dict) else {}

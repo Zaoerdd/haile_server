@@ -1,4 +1,4 @@
-const TAB_TITLES = {
+﻿const TAB_TITLES = {
     washTab: '洗衣',
     reservationTab: '预约',
     orderTab: '订单',
@@ -670,6 +670,35 @@ async function refreshOrdersOverview(reset) {
     await Promise.all([loadOrders(reset), loadActiveProcesses()]);
 }
 
+function isTerminalHistoryOrder(order) {
+    if (!order) {
+        return false;
+    }
+    const state = Number(order.state || 0);
+    const stateDesc = String(order.stateDesc || '');
+    if (state === 411 || state === 1000) {
+        return true;
+    }
+    if (state === 401) {
+        return stateDesc.includes('订单超时关闭');
+    }
+    return stateDesc.includes('已取消') || stateDesc.includes('已完成') || stateDesc.includes('订单超时关闭');
+}
+
+async function refreshVisibleOrderDetails(orders) {
+    const candidates = (orders || []).filter(order => order && order.orderNo && !isTerminalHistoryOrder(order));
+    if (!candidates.length) {
+        return;
+    }
+
+    const results = await Promise.allSettled(candidates.map(order => getOrderDetail(order.orderNo, true)));
+    results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+            updateOrderFromDetail(candidates[index].orderNo, result.value);
+        }
+    });
+}
+
 async function loadOrders(reset) {
     if (state.orders.loading) {
         return;
@@ -694,10 +723,12 @@ async function loadOrders(reset) {
             page: nextPage,
             pageSize: state.orders.pageSize,
         });
-        state.orders.items = reset ? (data.items || []) : state.orders.items.concat(data.items || []);
+        const pageItems = data.items || [];
+        state.orders.items = reset ? pageItems : state.orders.items.concat(pageItems);
         state.orders.page = data.page || nextPage;
         state.orders.total = data.total || state.orders.items.length;
         state.orders.hasMore = Boolean(data.hasMore);
+        await refreshVisibleOrderDetails(pageItems);
     } catch (error) {
         syncTokenFailure(error);
         handleRequestError(error, '读取订单失败。', true);
@@ -742,6 +773,14 @@ async function getOrderDetail(orderNo, forceRefresh = false) {
     const data = await apiGet(`/api/orders/${encodeURIComponent(orderNo)}`);
     cache.orderDetails.set(orderNo, data.order);
     return data.order;
+}
+
+function applyOrderDetail(orderNo, detail) {
+    if (!orderNo || !detail) {
+        return;
+    }
+    cache.orderDetails.set(orderNo, detail);
+    updateOrderFromDetail(orderNo, detail);
 }
 
 async function getProcessDetail(processId) {
@@ -1985,7 +2024,8 @@ async function handleOrderClick(event) {
         }
         const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/finish`, {});
         showToastMessage(data.msg || '订单已结束。');
-        await refreshSingleOrder(orderNo);
+        applyOrderDetail(orderNo, data.order);
+        await refreshSingleOrder(orderNo, data.order);
         await loadActiveProcesses();
         return;
     }
@@ -1995,15 +2035,20 @@ async function handleOrderClick(event) {
     }
     const data = await apiPost(`/api/orders/${encodeURIComponent(orderNo)}/cancel`, {});
     showToastMessage(data.msg || '订单已取消。');
-    await refreshSingleOrder(orderNo);
+    applyOrderDetail(orderNo, data.order);
+    await refreshSingleOrder(orderNo, data.order);
     await loadActiveProcesses();
 }
 
-async function refreshSingleOrder(orderNo) {
-    try {
-        updateOrderFromDetail(orderNo, await getOrderDetail(orderNo, true));
-    } catch (error) {
-        handleRequestError(error, '刷新订单详情失败。', true);
+async function refreshSingleOrder(orderNo, initialDetail = null) {
+    if (initialDetail) {
+        applyOrderDetail(orderNo, initialDetail);
+    } else {
+        try {
+            applyOrderDetail(orderNo, await getOrderDetail(orderNo, true));
+        } catch (error) {
+            handleRequestError(error, '刷新订单详情失败。', true);
+        }
     }
     await loadOrders(true);
 }
@@ -2021,6 +2066,10 @@ function updateOrderFromDetail(orderNo, detail) {
     item.completeTime = detail.completeTime;
     item.finishTime = detail.finishTime;
     item.invalidTime = detail.invalidTime;
+    item.buttonSwitch = detail.buttonSwitch || item.buttonSwitch;
+    item.machineName = detail.machineName || item.machineName;
+    item.modeName = detail.modeName || item.modeName;
+    item.shopName = detail.shopName || item.shopName;
 }
 
 async function handleSettingsSubmit(event) {
@@ -2089,7 +2138,7 @@ function parseDateValue(value) {
         return Number.isNaN(value.getTime()) ? null : value;
     }
     if (typeof value === 'number') {
-        const timestamp = value > 10_000_000_000 ? value : value * 1000;
+        const timestamp = value > 10000000000 ? value : value * 1000;
         const date = new Date(timestamp);
         return Number.isNaN(date.getTime()) ? null : date;
     }

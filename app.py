@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Any, Dict
 
 from flask import Flask, jsonify, render_template, request
@@ -255,6 +256,42 @@ def normalize_order_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
         },
         'raw': detail,
     }
+
+
+def sync_order_detail_after_action(
+    token: str,
+    order_no: str,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 0.35,
+    until_closed: bool = False,
+    until_not_pending: bool = False,
+) -> tuple[Dict[str, Any] | None, list[Any]]:
+    normalized_order_no = str(order_no or '').strip()
+    if not token or not normalized_order_no:
+        return None, []
+
+    client = HaierClient(token)
+    last_detail: Dict[str, Any] | None = None
+    debug_items: list[Any] = []
+    max_attempts = max(1, int(attempts))
+    for attempt in range(max_attempts):
+        detail_res = client.order_detail(normalized_order_no)
+        debug_items.append(detail_res.get('raw'))
+        if detail_res.get('ok'):
+            detail = detail_res.get('data') or {}
+            if isinstance(detail, dict) and detail:
+                last_detail = detail
+                classification = reservation_service._classify_order_detail(detail)
+                if until_closed and classification == 'closed':
+                    break
+                if until_not_pending and classification != 'pending':
+                    break
+                if not until_closed and not until_not_pending:
+                    break
+        if attempt < max_attempts - 1:
+            time.sleep(delay_seconds)
+    return last_detail, debug_items
 
 
 def build_todo_payload(order_detail: Dict[str, Any]) -> Dict[str, Any]:
@@ -535,8 +572,20 @@ def cancel_order(order_no: str):
     res = client.cancel_order(order_no)
     if not res.get('ok'):
         return json_error(res.get('msg') or '取消订单失败。', error_type=res.get('error_type', 'order_cancel_failed'), debug=res.get('raw'))
-    reservation_service.handle_manual_order_closed(order_no, '取消')
-    return jsonify({'status': 'success', 'msg': '订单已取消。', 'debug': res.get('raw')})
+    synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_not_pending=True)
+    reservation_service.handle_manual_order_closed(order_no, '取消', synced_detail)
+    workflow_manager.sync_process_for_order(token, order_no)
+    payload: Dict[str, Any] = {
+        'status': 'success',
+        'msg': '订单已取消。',
+        'debug': {
+            'action': res.get('raw'),
+            'orderDetail': detail_debug,
+        },
+    }
+    if synced_detail:
+        payload['order'] = normalize_order_detail(synced_detail)
+    return jsonify(payload)
 
 
 @app.route('/api/orders/<order_no>/finish', methods=['POST'])
@@ -550,8 +599,20 @@ def finish_order(order_no: str):
     res = client.finish_order(order_no)
     if not res.get('ok'):
         return json_error(res.get('msg') or '结束订单失败。', error_type=res.get('error_type', 'order_finish_failed'), debug=res.get('raw'))
-    reservation_service.handle_manual_order_closed(order_no, '结束')
-    return jsonify({'status': 'success', 'msg': '订单已结束。', 'debug': res.get('raw')})
+    synced_detail, detail_debug = sync_order_detail_after_action(token, order_no, until_not_pending=True)
+    reservation_service.handle_manual_order_closed(order_no, '结束', synced_detail)
+    workflow_manager.sync_process_for_order(token, order_no)
+    payload: Dict[str, Any] = {
+        'status': 'success',
+        'msg': '订单已结束。',
+        'debug': {
+            'action': res.get('raw'),
+            'orderDetail': detail_debug,
+        },
+    }
+    if synced_detail:
+        payload['order'] = normalize_order_detail(synced_detail)
+    return jsonify(payload)
 
 
 @app.route('/api/orders/history', methods=['POST'])
