@@ -71,6 +71,7 @@ const state = {
         reservationRefreshTimer: null,
         reservationRefreshInFlight: false,
         liveClockTimer: null,
+        ordersOverviewRefreshPromise: null,
     },
 };
 
@@ -423,12 +424,9 @@ function switchTab(tabId, options = {}) {
         loadReservations({ silent: true });
     }
 
-    if (tabId === 'orderTab' && isTokenReady() && !state.orders.loading) {
-        if (!state.orders.items.length && !state.orders.activeProcesses.length) {
-            refreshOrdersOverview(true).catch(error => handleRequestError(error, '读取订单失败。'));
-        } else {
-            loadActiveProcesses().catch(error => handleRequestError(error, '刷新流程列表失败。', true));
-        }
+    if (tabId === 'orderTab' && isTokenReady()) {
+        const preserveItems = Boolean(state.orders.items.length || state.orders.activeProcesses.length);
+        refreshOrdersOverview(true, { silent: true, preserveItems });
     }
 }
 
@@ -666,8 +664,36 @@ async function loadActiveProcesses() {
     }
 }
 
-async function refreshOrdersOverview(reset) {
-    await Promise.all([loadOrders(reset), loadActiveProcesses()]);
+async function refreshOrdersOverview(reset, options = {}) {
+    const { silent = false, preserveItems = false } = options;
+    if (!isTokenReady()) {
+        state.orders.activeProcesses = [];
+        renderOrders();
+        return;
+    }
+    if (state.ui.ordersOverviewRefreshPromise) {
+        return state.ui.ordersOverviewRefreshPromise;
+    }
+
+    let refreshPromise = null;
+    refreshPromise = (async () => {
+        try {
+            await Promise.all([
+                loadOrders(reset, { preserveItems }),
+                loadActiveProcesses(),
+            ]);
+        } catch (error) {
+            if (!silent) {
+                handleRequestError(error, '读取订单失败。');
+            }
+        } finally {
+            if (state.ui.ordersOverviewRefreshPromise === refreshPromise) {
+                state.ui.ordersOverviewRefreshPromise = null;
+            }
+        }
+    })();
+    state.ui.ordersOverviewRefreshPromise = refreshPromise;
+    return refreshPromise;
 }
 
 function isTerminalHistoryOrder(order) {
@@ -699,7 +725,8 @@ async function refreshVisibleOrderDetails(orders) {
     });
 }
 
-async function loadOrders(reset) {
+async function loadOrders(reset, options = {}) {
+    const { preserveItems = false } = options;
     if (state.orders.loading) {
         return;
     }
@@ -710,7 +737,7 @@ async function loadOrders(reset) {
     }
 
     state.orders.loading = true;
-    if (reset) {
+    if (reset && !preserveItems) {
         state.orders.items = [];
         state.orders.page = 0;
         state.orders.hasMore = true;
@@ -728,6 +755,9 @@ async function loadOrders(reset) {
         state.orders.page = data.page || nextPage;
         state.orders.total = data.total || state.orders.items.length;
         state.orders.hasMore = Boolean(data.hasMore);
+        if (reset && !preserveItems) {
+            state.orders.expanded = {};
+        }
         await refreshVisibleOrderDetails(pageItems);
     } catch (error) {
         syncTokenFailure(error);
@@ -1582,7 +1612,6 @@ async function handleWashClick(event) {
     }
     if (action === 'goto-orders') {
         switchTab('orderTab');
-        await refreshOrdersOverview(true);
         return;
     }
     if (action === 'back-home') {
@@ -1817,9 +1846,9 @@ async function advanceProcess() {
     await loadActiveProcesses();
     const latestOrderNo = (state.wash.process && (state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo))) || '';
     if (latestOrderNo) {
-        await loadOrders(true);
+        refreshOrdersOverview(true, { silent: true, preserveItems: true });
     } else if ((data.process || {}).completed) {
-        await loadOrders(true);
+        refreshOrdersOverview(true, { silent: true, preserveItems: true });
     }
     showToastMessage(data.msg || '流程已推进。');
 }
