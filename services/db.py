@@ -48,6 +48,7 @@ class Database:
             target_time TEXT NOT NULL,
             weekday INTEGER,
             time_of_day TEXT,
+            timezone_name TEXT,
             lead_minutes INTEGER NOT NULL,
             status TEXT NOT NULL,
             active_order_no TEXT,
@@ -104,6 +105,7 @@ class Database:
             with self.connect() as connection:
                 connection.executescript(schema)
                 self._ensure_column(connection, 'reservation_tasks', 'current_order_snapshot', 'TEXT')
+                self._ensure_column(connection, 'reservation_tasks', 'timezone_name', 'TEXT')
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing_columns = {

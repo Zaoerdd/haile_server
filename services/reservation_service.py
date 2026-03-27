@@ -3,8 +3,9 @@
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config import DEFAULT_LEAD_MINUTES
 from services.db import database
@@ -36,6 +37,8 @@ MACHINE_IDENTIFIER_KEYS = {
     'sn',
     'code',
 }
+NO_ADOPTABLE_PENDING_ORDER_MESSAGE = '没有找到可接手的最终待付款订单。'
+HISTORY_ORDER_LOOKUP_PAGE_SIZE = 20
 
 
 def now_local() -> datetime:
@@ -68,11 +71,31 @@ def parse_time_of_day(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def next_weekly_target(weekday: int, time_of_day: str, reference: datetime | None = None) -> datetime:
+def normalize_timezone_name(value: Any) -> str | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        ZoneInfo(text)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError('时区无效，请刷新页面后重试') from exc
+    return text
+
+
+def resolve_timezone(timezone_name: str | None):
+    if timezone_name:
+        try:
+            return ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            pass
+    return now_local().tzinfo or timezone.utc
+
+
+def next_weekly_target(weekday: int, time_of_day: str, reference: datetime | None = None, timezone_name: str | None = None) -> datetime:
     if weekday < 0 or weekday > 6:
         raise ValueError('每周预约的星期必须在 0-6 之间')
     hour, minute = parse_time_of_day(time_of_day)
-    ref = reference or now_local()
+    ref = (reference or now_local()).astimezone(resolve_timezone(timezone_name))
     candidate = ref.replace(hour=hour, minute=minute, second=0, microsecond=0)
     days_ahead = (weekday - candidate.weekday()) % 7
     candidate = candidate + timedelta(days=days_ahead)
@@ -103,6 +126,7 @@ class ReservationTask:
     target_time: datetime
     weekday: int | None
     time_of_day: str | None
+    timezone_name: str | None
     lead_minutes: int
     status: ReservationStatus
     active_order_no: str | None
@@ -132,6 +156,7 @@ class ReservationTask:
             target_time=parse_iso(row['target_time']) or now_local(),
             weekday=int(row['weekday']) if row['weekday'] is not None else None,
             time_of_day=str(row['time_of_day']) if row['time_of_day'] is not None else None,
+            timezone_name=str(row['timezone_name']) if row['timezone_name'] is not None else None,
             lead_minutes=int(row['lead_minutes']),
             status=str(row['status']),
             active_order_no=str(row['active_order_no']) if row['active_order_no'] is not None else None,
@@ -161,6 +186,7 @@ class ReservationTask:
             'targetTime': to_iso(self.target_time),
             'weekday': self.weekday,
             'timeOfDay': self.time_of_day,
+            'timeZone': self.timezone_name,
             'leadMinutes': self.lead_minutes,
             'status': self.status,
             'activeOrderNo': self.active_order_no,
@@ -498,7 +524,7 @@ class ReservationService:
 
             if classification in {'completed', 'running'}:
                 if task.schedule_type == 'weekly':
-                    self._advance_weekly_task(task, '检测到订单已支付并开始运行，任务已滚动到下一周。')
+                    self._advance_weekly_task(task, '检测到订单已完成或已开始运行，任务已滚动到下一周。')
                 else:
                     self._update_task(
                         task.id,
@@ -580,7 +606,7 @@ class ReservationService:
             items.append(item)
         return items
 
-    def _has_conflict(self, machine_source: str, machine_id: str, schedule_type: str, target_time: datetime, lead_minutes: int, weekday: int | None, time_of_day: str | None) -> bool:
+    def _has_conflict(self, machine_source: str, machine_id: str, schedule_type: str, target_time: datetime, lead_minutes: int, weekday: int | None, time_of_day: str | None, timezone_name: str | None = None) -> bool:
         rows = database.fetch_all(
             '''
             SELECT *
@@ -596,7 +622,7 @@ class ReservationService:
             task = ReservationTask.from_row(row)
             other_start, other_end = build_windows(task.target_time, task.lead_minutes)
             if task.schedule_type == 'weekly' and schedule_type == 'weekly':
-                if task.weekday == weekday and task.time_of_day == time_of_day:
+                if task.weekday == weekday and task.time_of_day == time_of_day and task.timezone_name == timezone_name:
                     return True
             if start_at < other_end and hold_until > other_start:
                 return True
@@ -634,6 +660,7 @@ class ReservationService:
 
         weekday = payload.get('weekday')
         time_of_day = str(payload.get('timeOfDay') or '').strip() or None
+        timezone_name = None
         if schedule_type == 'once':
             target_time_raw = str(payload.get('targetTime') or '').strip()
             if not target_time_raw:
@@ -651,9 +678,19 @@ class ReservationService:
             if not time_of_day:
                 raise ValueError('每周预约必须提供时间')
             weekday = weekday_value
-            target_time = next_weekly_target(weekday_value, time_of_day)
+            timezone_name = normalize_timezone_name(payload.get('timeZone'))
+            target_time = next_weekly_target(weekday_value, time_of_day, timezone_name=timezone_name)
 
-        if self._has_conflict(machine_source, machine_id, schedule_type, target_time, lead_minutes, int(weekday) if weekday is not None else None, time_of_day):
+        if self._has_conflict(
+            machine_source,
+            machine_id,
+            schedule_type,
+            target_time,
+            lead_minutes,
+            int(weekday) if weekday is not None else None,
+            time_of_day,
+            timezone_name,
+        ):
             raise ValueError('同一台机器在相同时间窗口内已经存在活跃预约任务')
 
         if not title:
@@ -665,11 +702,11 @@ class ReservationService:
             '''
             INSERT INTO reservation_tasks(
                 title, machine_source, machine_id, machine_name, room_id, room_name, qr_code,
-                mode_id, mode_name, schedule_type, target_time, weekday, time_of_day,
+                mode_id, mode_name, schedule_type, target_time, weekday, time_of_day, timezone_name,
                 lead_minutes, status, active_order_no, start_at, hold_until, last_checked_at,
                 last_error, last_run_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, ?, NULL, NULL, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', NULL, ?, ?, NULL, NULL, NULL, ?, ?)
             ''',
             (
                 title,
@@ -685,6 +722,7 @@ class ReservationService:
                 to_iso(target_time),
                 weekday,
                 time_of_day,
+                timezone_name,
                 lead_minutes,
                 start_at_iso,
                 hold_until_iso,
@@ -692,7 +730,12 @@ class ReservationService:
                 created_at,
             ),
         )
-        self._record_event(task_id, 'task_created', '预约任务已创建。', {'targetTime': to_iso(target_time), 'leadMinutes': lead_minutes})
+        self._record_event(
+            task_id,
+            'task_created',
+            '预约任务已创建。',
+            {'targetTime': to_iso(target_time), 'leadMinutes': lead_minutes, 'timeZone': timezone_name},
+        )
         task = self._fetch_task(task_id)
         return task.to_dict(self._fetch_last_event(task_id)) if task else {}
 
@@ -721,13 +764,29 @@ class ReservationService:
         if task.schedule_type == 'once' and task.target_time + timedelta(minutes=10) <= now_local():
             raise ValueError('单次预约的保单窗口已经结束，请重新创建预约任务')
         updated_at = to_iso(now_local()) or ''
+        target_time = None
+        start_at = None
+        hold_until = None
+        if task.schedule_type == 'weekly':
+            if task.weekday is None or not task.time_of_day:
+                raise ValueError('周任务缺少周期配置，请重新创建任务')
+            next_target = next_weekly_target(task.weekday, task.time_of_day, reference=now_local(), timezone_name=task.timezone_name)
+            target_time = to_iso(next_target)
+            start_at, hold_until = self._build_task_windows(next_target, task.lead_minutes)
         database.execute(
             '''
             UPDATE reservation_tasks
-            SET status = 'scheduled', active_order_no = NULL, last_error = NULL, current_order_snapshot = NULL, updated_at = ?
+            SET status = 'scheduled',
+                active_order_no = NULL,
+                last_error = NULL,
+                current_order_snapshot = NULL,
+                updated_at = ?,
+                target_time = COALESCE(?, target_time),
+                start_at = COALESCE(?, start_at),
+                hold_until = COALESCE(?, hold_until)
             WHERE id = ?
             ''',
-            (updated_at, task_id),
+            (updated_at, target_time, start_at, hold_until, task_id),
         )
         self._record_event(task_id, 'task_resumed', '预约任务已恢复。')
         updated = self._fetch_task(task_id)
@@ -813,6 +872,60 @@ class ReservationService:
         order_blob = json.dumps(order, ensure_ascii=False, sort_keys=True)
         return any(identifier and len(identifier) >= 6 and identifier in order_blob for identifier in machine_identifiers)
 
+    def _candidate_sort_key(self, summary: Dict[str, Any], detail: Dict[str, Any] | None = None) -> str:
+        detail_payload = detail if isinstance(detail, dict) else {}
+        return str(
+            summary.get('updateTime')
+            or summary.get('gmtModified')
+            or summary.get('createTime')
+            or detail_payload.get('updateTime')
+            or detail_payload.get('gmtModified')
+            or detail_payload.get('createTime')
+            or ''
+        )
+
+    def _build_lookup_issue(
+        self,
+        *,
+        priority: int,
+        message: str,
+        order_no: str,
+        source: str,
+        debug: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        return {
+            'priority': priority,
+            'message': message,
+            'orderNo': order_no,
+            'source': source,
+            'debug': debug,
+        }
+
+    def _inspect_existing_pending_candidate(
+        self,
+        client: HaierClient,
+        order_no: str,
+        detail: Dict[str, Any],
+        machine_identifiers: set[str],
+    ) -> tuple[bool, Dict[str, Any] | None, str | None]:
+        current = self._settle_pending_order_detail(client, order_no, detail if isinstance(detail, dict) else {})
+        if not isinstance(current, dict) or not current:
+            return False, None, '找到待支付候选订单，但详情为空。'
+        if not self._order_matches_machine(current, machine_identifiers):
+            return False, current, None
+
+        classification = self._classify_order_detail(current)
+        if classification == 'manual_check_required':
+            return False, current, '找到同机待支付订单，但处于待验证阶段，暂不接手。'
+        if classification != 'pending':
+            return False, current, '找到候选订单，但详情已不是待支付状态。'
+        if not self._is_final_pending_stage(current):
+            page_code = str(current.get('pageCode') or '')
+            if page_code == 'place_clothes':
+                return False, current, '找到同机待支付订单，但仍处于 place_clothes，暂不接手。'
+            return False, current, '找到同机待支付订单，但尚未进入最终待付款状态。'
+        return True, current, None
+
     def _find_existing_pending_order(
         self,
         task: ReservationTask,
@@ -820,40 +933,103 @@ class ReservationService:
         qr_code: str,
         scan_data: Dict[str, Any],
         excluded_order_nos: set[str] | None = None,
-    ) -> tuple[str, Dict[str, Any]] | None:
+    ) -> tuple[tuple[str, Dict[str, Any]] | None, str | None, Dict[str, Any] | None]:
         excluded = {str(item).strip() for item in (excluded_order_nos or set()) if str(item).strip()}
-        orders_res = client.get_underway_orders()
-        if not orders_res.get('ok'):
-            return None
-
         machine_identifiers = self._build_machine_identifiers(qr_code, scan_data)
         candidates: list[tuple[str, str, Dict[str, Any]]] = []
-        for order in orders_res.get('data') or []:
-            if not self._order_matches_machine(order, machine_identifiers):
-                continue
-            order_no = str(order.get('orderNo') or '').strip()
-            if not order_no:
-                continue
-            if order_no in excluded:
-                continue
-            detail_res = client.order_detail(order_no)
-            if not detail_res.get('ok'):
-                continue
-            detail = detail_res.get('data') or {}
-            if self._classify_order_detail(detail) != 'pending':
-                continue
-            ok, ensured_detail, _, _ = self._ensure_final_pending_order(client, order_no, detail)
-            if not ok or not ensured_detail:
-                continue
-            sort_key = str(order.get('updateTime') or order.get('gmtModified') or order.get('createTime') or '')
-            candidates.append((sort_key, order_no, ensured_detail))
+        seen_order_nos: set[str] = set()
+        best_issue: Dict[str, Any] | None = None
+
+        def remember_issue(issue: Dict[str, Any] | None) -> None:
+            nonlocal best_issue
+            if not issue:
+                return
+            if best_issue is None or int(issue.get('priority') or 0) > int(best_issue.get('priority') or 0):
+                best_issue = issue
+
+        def inspect_orders(orders: Iterable[Dict[str, Any]], source: str) -> None:
+            for order in orders or []:
+                order_no = str((order or {}).get('orderNo') or '').strip()
+                if not order_no or order_no in excluded or order_no in seen_order_nos:
+                    continue
+                seen_order_nos.add(order_no)
+
+                summary = order if isinstance(order, dict) else {}
+                summary_classification = self._classify_order_detail(summary)
+                summary_matches_machine = self._order_matches_machine(summary, machine_identifiers)
+                should_inspect = summary_classification == 'pending' or (summary_matches_machine and summary_classification == 'unknown')
+                if not should_inspect:
+                    continue
+
+                debug: Dict[str, Any] = {'source': source, 'summary': summary}
+                detail_res = client.order_detail(order_no)
+                debug['orderDetail'] = detail_res.get('raw')
+                if not detail_res.get('ok'):
+                    remember_issue(
+                        self._build_lookup_issue(
+                            priority=20,
+                            message='找到待支付候选订单，但详情读取失败。',
+                            order_no=order_no,
+                            source=source,
+                            debug=debug,
+                        )
+                    )
+                    continue
+
+                detail = detail_res.get('data') or {}
+                ok, settled_detail, reason = self._inspect_existing_pending_candidate(client, order_no, detail, machine_identifiers)
+                debug['settledDetail'] = settled_detail
+                if ok and settled_detail:
+                    candidates.append((self._candidate_sort_key(summary, settled_detail), order_no, settled_detail))
+                    continue
+
+                if settled_detail and not self._order_matches_machine(settled_detail, machine_identifiers):
+                    if summary_matches_machine:
+                        remember_issue(
+                            self._build_lookup_issue(
+                                priority=10,
+                                message='找到候选订单，但详情确认不是当前机器。',
+                                order_no=order_no,
+                                source=source,
+                                debug=debug,
+                            )
+                        )
+                    continue
+
+                if reason:
+                    priority = 25
+                    if 'place_clothes' in reason:
+                        priority = 40
+                    elif '待验证' in reason:
+                        priority = 35
+                    remember_issue(
+                        self._build_lookup_issue(
+                            priority=priority,
+                            message=reason,
+                            order_no=order_no,
+                            source=source,
+                            debug=debug,
+                        )
+                    )
+
+        orders_res = client.get_underway_orders()
+        if orders_res.get('ok'):
+            inspect_orders(orders_res.get('data') or [], 'underway')
 
         if not candidates:
-            return None
+            history_res = client.list_history_orders(page=1, page_size=HISTORY_ORDER_LOOKUP_PAGE_SIZE)
+            if history_res.get('ok'):
+                history_data = history_res.get('data') or {}
+                inspect_orders(history_data.get('items') or [], 'history')
+
+        if not candidates:
+            if best_issue:
+                return None, str(best_issue.get('message') or NO_ADOPTABLE_PENDING_ORDER_MESSAGE), best_issue.get('debug')
+            return None, NO_ADOPTABLE_PENDING_ORDER_MESSAGE, None
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         _, order_no, detail = candidates[0]
-        return order_no, detail
+        return (order_no, detail), None, None
 
     def _create_pending_order(
         self,
@@ -872,7 +1048,7 @@ class ReservationService:
         goods_id = scan_data.get('goodsId')
         if not goods_id:
             return False, '扫码结果缺少 goodsId。', scan_res.get('raw'), 'failed'
-        existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
+        existing_order, _, _ = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
         if existing_order:
             order_no, detail = existing_order
             return True, order_no, detail, 'adopted'
@@ -887,10 +1063,12 @@ class ReservationService:
         )
         if not create_res.get('ok'):
             if create_res.get('error_type') == 'business':
-                existing_order = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
+                existing_order, adoption_reason, adoption_debug = self._find_existing_pending_order(task, client, task.qr_code, scan_data, excluded_order_nos)
                 if existing_order:
                     order_no, detail = existing_order
                     return True, order_no, detail, 'adopted'
+                if adoption_reason and adoption_reason != NO_ADOPTABLE_PENDING_ORDER_MESSAGE:
+                    return False, adoption_reason, adoption_debug or create_res.get('raw'), 'failed_business'
                 return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), 'failed_business'
             return False, create_res.get('msg') or '创建预约订单失败。', create_res.get('raw'), f"failed_{create_res.get('error_type') or 'unknown'}"
         order_data = create_res.get('data') or {}
@@ -932,7 +1110,8 @@ class ReservationService:
             self._update_task(task.id, status='failed', last_error='周任务缺少周期配置', active_order_no=None)
             self._record_event(task.id, 'task_failed', '周任务缺少周期配置，已停止调度。')
             return
-        next_target = next_weekly_target(task.weekday, task.time_of_day, reference=task.target_time + timedelta(minutes=11))
+        reference = max(now_local(), task.target_time + timedelta(minutes=11))
+        next_target = next_weekly_target(task.weekday, task.time_of_day, reference=reference, timezone_name=task.timezone_name)
         start_at_iso, hold_until_iso = self._build_task_windows(next_target, task.lead_minutes)
         self._update_task(
             task.id,
@@ -1013,7 +1192,7 @@ class ReservationService:
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
-                        '检测到当前机器已有待支付订单，已接管当前订单。',
+                        '检测到当前机器已有最终待付款订单，已接管当前订单。',
                         {'orderNo': order_no, 'processId': process_id},
                     )
                     self._notify('预约已接管现有订单', f'{task.title}\n订单号：{order_no}')
@@ -1165,7 +1344,7 @@ class ReservationService:
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
-                        '旧订单失效后，接管了当前机器上的新待支付订单。',
+                        '旧订单失效后，接管了当前机器上的新最终待付款订单。',
                         {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
                     )
                     continue
@@ -1192,10 +1371,10 @@ class ReservationService:
                 completed_count += 1
                 state_desc = (snapshot or {}).get('stateDesc') or (snapshot or {}).get('state') or '未知状态'
                 if task.schedule_type == 'weekly':
-                    self._advance_weekly_task(task, '检测到订单已支付并开始运行，任务已滚动到下一周。')
+                    self._advance_weekly_task(task, '检测到订单已完成或已开始运行，任务已滚动到下一周。')
                 else:
                     self._update_task(task.id, status='completed', last_run_at=to_iso(now), last_error=None)
-                    self._record_event(task.id, 'task_completed', '检测到预约订单已支付完成，本次预约结束。', {'orderNo': task.active_order_no})
+                    self._record_event(task.id, 'task_completed', '检测到预约订单已完成或已开始运行，本次预约结束。', {'orderNo': task.active_order_no})
                 self._notify('预约任务已完成', f'{task.title}\n订单状态：{state_desc}')
                 continue
 
@@ -1232,7 +1411,7 @@ class ReservationService:
                     self._record_event(
                         task.id,
                         'existing_order_adopted',
-                        '原订单失效后，检测到当前机器已有新的待支付订单，已接管当前订单。',
+                        '原订单失效后，检测到当前机器已有新的最终待付款订单，已接管当前订单。',
                         {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
                     )
                     self._notify('预约已接管现有订单', f'{task.title}\n订单号：{order_no}')

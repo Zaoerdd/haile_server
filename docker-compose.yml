@@ -1,13 +1,11 @@
-version: '3.8'
-
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
     container_name: npm
     restart: unless-stopped
     ports:
-      - '8080:80'
-      - '81:81'
+      - "8080:80"
+      - "81:81"
     volumes:
       - ./npm/data:/data
       - ./npm/letsencrypt:/etc/letsencrypt
@@ -22,8 +20,15 @@ services:
     restart: unless-stopped
     env_file:
       - ./haile_server/.env
+    environment:
+      PORT: "5000"
+      PYTHONUNBUFFERED: "1"
+      GUNICORN_WORKERS: "1"
+      GUNICORN_THREADS: "2"
+      GUNICORN_TIMEOUT: "60"
     volumes:
       - ./haile_server/machines.json:/app/machines.json:ro
+      - ./haile_server/haile_server.db:/app/haile_server.db
     networks:
       - backend
 

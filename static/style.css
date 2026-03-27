@@ -595,6 +595,68 @@ label > select {
     margin-top: 0;
 }
 
+.reservation-card {
+    padding: 10px 11px;
+}
+
+.reservation-card .compact-card-head {
+    gap: 8px;
+}
+
+.reservation-card .compact-main h4 {
+    font-size: 14px;
+}
+
+.reservation-card .compact-main p {
+    margin-top: 2px;
+}
+
+.reservation-card .compact-side {
+    gap: 4px;
+}
+
+.reservation-card .compact-side-value {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+}
+
+.reservation-meta-row {
+    margin-top: 6px;
+    gap: 5px;
+}
+
+.reservation-card .meta-pill {
+    padding: 5px 7px;
+    font-size: 10px;
+}
+
+.reservation-notices {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.reservation-callout {
+    padding: 10px 12px;
+    border-radius: 14px;
+}
+
+.reservation-actions {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.reservation-actions-primary .btn {
+    flex: 1 1 100%;
+}
+
+.reservation-actions-secondary .btn {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
 .history-order-row {
     padding: 10px 12px;
     border-radius: 18px;
@@ -941,6 +1003,11 @@ label > select {
     .action-row .btn,
     .compact-actions .btn {
         flex-basis: 100%;
+    }
+
+    .reservation-actions-secondary .btn {
+        flex: 1 1 0;
+        flex-basis: auto;
     }
 
     .floating-refresh {

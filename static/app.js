@@ -6,11 +6,10 @@
 };
 
 const PROCESS_STEPS = [
-    { id: 1, label: '解析机器', hint: '确认当前二维码对应的设备信息' },
-    { id: 2, label: '创建订单', hint: '创建待支付订单，订单页可继续流程' },
-    { id: 3, label: '确认放衣', hint: '放入衣物并确认关门' },
-    { id: 4, label: '生成预支付', hint: '准备结算单和支付参数' },
-    { id: 5, label: '支付启动', hint: '执行支付并启动设备' },
+    { id: 1, label: '解析机器', hint: '确认当前二维码对应的设备信息', backendSteps: [1] },
+    { id: 2, label: '创建订单', hint: '创建待支付订单，订单页可继续流程', backendSteps: [2] },
+    { id: 3, label: '确认放衣', hint: '放入衣物并确认关门', backendSteps: [3] },
+    { id: 4, label: '付款', hint: '生成支付参数并完成支付', backendSteps: [4, 5] },
 ];
 
 const DEFAULT_TOKEN_STATUS = {
@@ -93,6 +92,44 @@ const cache = {
 };
 
 const el = {};
+
+function displayProcessStepId(stepId) {
+    const numericStep = Number(stepId || 0);
+    if (numericStep === 5) {
+        return 4;
+    }
+    return numericStep;
+}
+
+function resolveProcessDisplayStep(process) {
+    const currentStep = Number((process || {}).currentStep || 0);
+    return PROCESS_STEPS.find(step => (step.backendSteps || [step.id]).includes(currentStep)) || null;
+}
+
+function processDisplayStepLabel(process) {
+    if ((process || {}).completed) {
+        return '已完成';
+    }
+    const step = resolveProcessDisplayStep(process);
+    if (step) {
+        return step.label;
+    }
+    return (process || {}).currentStepLabel || '待执行';
+}
+
+function normalizeProcessToastMessage(message) {
+    const text = String(message || '').trim();
+    if (!text) {
+        return '流程已推进。';
+    }
+    if (text.startsWith('步骤 4 完成：')) {
+        return '付款阶段已准备就绪。';
+    }
+    if (text.startsWith('步骤 5 完成：')) {
+        return '付款成功，设备已启动。';
+    }
+    return text;
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     state.activeTab = getTabFromLocation();
@@ -1276,6 +1313,29 @@ function joinCompactText(parts) {
         .join(' · ');
 }
 
+function dedupeCompactTextList(items) {
+    const seen = new Set();
+    return (items || [])
+        .map(item => String(item || '').trim())
+        .filter(Boolean)
+        .filter(item => {
+            const key = normalizeComparableText(item);
+            if (!key || seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+}
+
+function textAppearsInMessages(messages, value) {
+    const target = normalizeComparableText(value);
+    if (!target) {
+        return false;
+    }
+    return (messages || []).some(message => normalizeComparableText(message).includes(target));
+}
+
 function renderMetaPill(label, value) {
     const text = String(value == null ? '' : value).trim();
     if (!text || text === '--') {
@@ -1286,6 +1346,28 @@ function renderMetaPill(label, value) {
 
 function renderCardIcon() {
     return '<span class="card-icon" aria-hidden="true">></span>';
+}
+
+function weekdayLabel(value) {
+    const labels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const index = Number(value);
+    return Number.isInteger(index) && index >= 0 && index < labels.length ? labels[index] : '--';
+}
+
+function reservationScheduleText(task) {
+    if ((task || {}).scheduleType === 'weekly') {
+        const timeText = String((task || {}).timeOfDay || '').trim() || '--';
+        return `每${weekdayLabel((task || {}).weekday)} ${timeText} · 下次 ${formatDateTime((task || {}).targetTime)}`;
+    }
+    return `单次 · ${formatDateTime((task || {}).targetTime)}`;
+}
+
+function getBrowserTimeZone() {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch (error) {
+        return '';
+    }
 }
 
 function renderWashLoading(message) {
@@ -1491,15 +1573,17 @@ function renderWashProcessView() {
     }
 
     const currentStep = Number(process.currentStep || 1);
+    const displayStep = displayProcessStepId(currentStep) || 1;
+    const displayStepLabel = processDisplayStepLabel(process);
     const order = process.order || null;
     const orderNo = process.orderNo || ((process.contextSummary || {}).orderNo) || '';
     const stepList = PROCESS_STEPS.map(step => {
         let className = 'pending';
         let text = '待执行';
-        if (process.completed || currentStep > step.id) {
+        if (process.completed || displayStep > step.id) {
             className = 'success';
             text = '完成';
-        } else if (!process.completed && !process.terminated && currentStep === step.id) {
+        } else if (!process.completed && !process.terminated && displayStep === step.id) {
             className = 'warning';
             text = '当前';
         } else if (process.terminated) {
@@ -1521,7 +1605,7 @@ function renderWashProcessView() {
         ? renderStatusCard('danger', '流程已终止', process.blockedReason || '当前流程无法继续。')
         : process.completed
             ? renderStatusCard('success', '流程已完成', '订单已经支付并启动。')
-            : renderStatusCard('warning', '手动扫码流程', `当前步骤：${process.currentStepLabel || '待执行'}`);
+            : renderStatusCard('warning', '手动扫码流程', `当前步骤：${displayStepLabel}`);
 
     return `
         ${summaryCard}
@@ -1552,7 +1636,7 @@ function renderWashProcessView() {
             <div class="process-step-list">${stepList}</div>
             <div class="spacer-sm"></div>
             <div class="action-row">
-                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">下一步：${escapeHtml(process.currentStepLabel || '继续')}</button>` : ''}
+                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">下一步：${escapeHtml(displayStepLabel || '继续')}</button>` : ''}
                 <button class="btn btn-light" type="button" data-action="goto-orders">去订单页继续</button>
                 <button class="btn btn-danger" type="button" data-action="reset-process">放弃流程</button>
             </div>
@@ -1620,7 +1704,6 @@ function renderReservations() {
             <div class="compact-summary">
                 <div class="compact-main">
                     <h3>预约任务</h3>
-                    <p>手动结束订单后会自动暂停任务。</p>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip pending">${items.length} 个</span>
@@ -1827,32 +1910,65 @@ function renderReservationCard(task) {
     const lastEvent = task.lastEvent || {};
     const statusClass = reservationStatusClass(task.status);
     const currentOrder = task.currentOrder || null;
-    const subtitle = joinCompactText([task.machineName || '', task.modeName || '']);
+    const title = String(task.title || task.machineName || '预约任务').trim() || '预约任务';
+    const titleKey = normalizeComparableText(title);
+    const subtitle = uniqueSubtitle(title, joinCompactText(
+        [task.machineName || '', task.modeName || ''].filter(part => normalizeComparableText(part) !== titleKey)
+    ));
+    const scheduleText = reservationScheduleText(task);
+    const notices = [];
+    const noticeMessages = dedupeCompactTextList([task.lastError, lastEvent.message]);
+    if (task.lastError && textAppearsInMessages(noticeMessages, task.lastError)) {
+        notices.push({ className: 'warning', text: String(task.lastError).trim() });
+    }
+    if (lastEvent.message && !textAppearsInMessages(notices.map(item => item.text), lastEvent.message)) {
+        notices.push({ className: '', text: String(lastEvent.message).trim() });
+    }
+    const orderStateText = String((currentOrder || {}).stateDesc || '').trim();
+    const activeOrderText = String(task.activeOrderNo || '').trim();
+    const metaItems = [
+        renderMetaPill('保单窗口', formatWindow(task.startAt, task.holdUntil))
+    ];
+    if (activeOrderText && !textAppearsInMessages(noticeMessages, activeOrderText)) {
+        metaItems.push(renderMetaPill('活跃订单', maskCode(activeOrderText)));
+    }
+    if (orderStateText && !textAppearsInMessages(noticeMessages, orderStateText)) {
+        metaItems.push(renderMetaPill('订单状态', orderStateText));
+    }
+    metaItems.push(renderMetaPill('最近检查', formatDateTime(task.lastCheckedAt)));
+    const toggleButton = task.status === 'paused'
+        ? `<button class="btn btn-secondary" type="button" data-action="resume-reservation" data-task-id="${escapeHtml(String(task.id))}">恢复</button>`
+        : `<button class="btn btn-light" type="button" data-action="pause-reservation" data-task-id="${escapeHtml(String(task.id))}">暂停</button>`;
     return `
-        <article class="order-card">
+        <article class="order-card reservation-card">
             <div class="compact-card-head">
                 <div class="compact-main">
-                    <h4>${escapeHtml(task.title || task.machineName || '预约任务')}</h4>
+                    <h4>${escapeHtml(title)}</h4>
                     ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
                 </div>
                 <div class="compact-side">
                     <span class="chip ${statusClass}">${escapeHtml(reservationStatusLabel(task.status))}</span>
-                    <span class="compact-side-value">${escapeHtml(formatDateTime(task.targetTime))}</span>
+                    <span class="compact-side-value">${escapeHtml(scheduleText)}</span>
                 </div>
             </div>
-            <div class="compact-meta-row">
-                ${renderMetaPill('保单窗口', formatWindow(task.startAt, task.holdUntil))}
-                ${renderMetaPill('活跃订单', task.activeOrderNo || '')}
-                ${renderMetaPill('订单状态', (currentOrder || {}).stateDesc || '')}
-                ${renderMetaPill('最近检查', formatDateTime(task.lastCheckedAt))}
+            <div class="compact-meta-row reservation-meta-row">
+                ${metaItems.filter(Boolean).join('')}
             </div>
-            ${task.lastError ? `<div class="spacer-sm"></div><div class="callout warning">${escapeHtml(task.lastError)}</div>` : ''}
-            ${lastEvent.message ? `<div class="spacer-sm"></div><div class="callout">${escapeHtml(lastEvent.message)}</div>` : ''}
-            <div class="spacer-sm"></div>
-            <div class="compact-actions">
-                ${task.processId ? `<button class="btn btn-primary" type="button" data-action="continue-reservation-process" data-task-id="${escapeHtml(String(task.id))}" data-process-id="${escapeHtml(task.processId)}">继续流程</button>` : ''}
-                ${task.status === 'paused' ? `<button class="btn btn-secondary" type="button" data-action="resume-reservation" data-task-id="${escapeHtml(String(task.id))}">恢复</button>` : `<button class="btn btn-light" type="button" data-action="pause-reservation" data-task-id="${escapeHtml(String(task.id))}">暂停</button>`}
-                <button class="btn btn-danger" type="button" data-action="delete-reservation" data-task-id="${escapeHtml(String(task.id))}">删除</button>
+            ${notices.length ? `
+                <div class="reservation-notices">
+                    ${notices.map(item => `<div class="callout reservation-callout${item.className ? ` ${item.className}` : ''}">${escapeHtml(item.text)}</div>`).join('')}
+                </div>
+            ` : ''}
+            <div class="reservation-actions">
+                ${task.processId ? `
+                    <div class="compact-actions reservation-actions-primary">
+                        <button class="btn btn-primary" type="button" data-action="continue-reservation-process" data-task-id="${escapeHtml(String(task.id))}" data-process-id="${escapeHtml(task.processId)}">继续流程</button>
+                    </div>
+                ` : ''}
+                <div class="compact-actions reservation-actions-secondary">
+                    ${toggleButton}
+                    <button class="btn btn-danger" type="button" data-action="delete-reservation" data-task-id="${escapeHtml(String(task.id))}">删除</button>
+                </div>
             </div>
         </article>
     `;
@@ -1873,7 +1989,7 @@ function renderActiveProcessCard(process) {
                     <p>最近更新 ${escapeHtml(formatDateTime(process.updatedAt))}</p>
                 </div>
                 <div class="compact-side">
-                    <span class="chip warning">${escapeHtml(process.currentStepLabel || '待继续')}</span>
+                    <span class="chip warning">${escapeHtml(processDisplayStepLabel(process))}</span>
                     ${timeMeta ? `<span class="compact-side-value">${escapeHtml(formatDateTime(timeMeta.value))}</span>` : ''}
                 </div>
             </div>
@@ -2254,7 +2370,7 @@ async function advanceProcess() {
     } else if ((data.process || {}).completed) {
         refreshOrdersOverview(true, { silent: true, preserveItems: true });
     }
-    showToastMessage(data.msg || '流程已推进。');
+    showToastMessage(normalizeProcessToastMessage(data.msg));
 }
 
 async function resetProcess() {
@@ -2313,6 +2429,7 @@ async function handleReservationSubmit(event) {
     } else {
         payload.weekday = Number(el.reservationWeekday.value);
         payload.timeOfDay = el.reservationWeeklyTime.value;
+        payload.timeZone = getBrowserTimeZone();
     }
 
     if (source === 'scan') {
