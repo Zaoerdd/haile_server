@@ -60,16 +60,25 @@ class ReservationScheduler:
             'lastError': self.last_error,
         }
 
+    def wake(self) -> None:
+        self._wake_event.set()
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             self.last_tick_at = now_iso()
+            wait_seconds = self.interval_seconds
             try:
                 self.last_result = reservation_service.process_due_tasks()
                 self.last_error = None
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
+            else:
+                try:
+                    wait_seconds = reservation_service.next_poll_delay_seconds(self.interval_seconds)
+                except Exception:  # noqa: BLE001
+                    wait_seconds = self.interval_seconds
 
-            self._wake_event.wait(self.interval_seconds)
+            self._wake_event.wait(wait_seconds)
             self._wake_event.clear()
 
 

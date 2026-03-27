@@ -39,6 +39,7 @@ MACHINE_IDENTIFIER_KEYS = {
 }
 NO_ADOPTABLE_PENDING_ORDER_MESSAGE = '没有找到可接手的最终待付款订单。'
 HISTORY_ORDER_LOOKUP_PAGE_SIZE = 20
+EARLY_RENEW_LEAD_SECONDS = 60
 
 
 def now_local() -> datetime:
@@ -351,6 +352,20 @@ class ReservationService:
         if not snapshot:
             return None
         return parse_iso(str(snapshot.get('invalidTime') or '').strip() or None)
+
+    def _get_snapshot_early_renew_at(self, snapshot: Dict[str, Any] | None) -> datetime | None:
+        invalid_at = self._get_snapshot_invalid_at(snapshot)
+        if invalid_at is None:
+            return None
+        return invalid_at - timedelta(seconds=EARLY_RENEW_LEAD_SECONDS)
+
+    def _is_early_renew_due(self, snapshot: Dict[str, Any] | None, reference: datetime | None = None) -> bool:
+        invalid_at = self._get_snapshot_invalid_at(snapshot)
+        early_renew_at = self._get_snapshot_early_renew_at(snapshot)
+        if invalid_at is None or early_renew_at is None:
+            return False
+        ref = reference or now_local()
+        return early_renew_at <= ref < invalid_at
 
     def _is_final_pending_stage(self, detail: Dict[str, Any]) -> bool:
         if self._classify_order_detail(detail) != 'pending':
@@ -1125,6 +1140,54 @@ class ReservationService:
         )
         self._record_event(task.id, 'weekly_rolled', message, {'nextTargetTime': to_iso(next_target)})
 
+    def next_poll_delay_seconds(self, max_interval: float) -> float:
+        try:
+            limit = float(max_interval)
+        except (TypeError, ValueError):
+            limit = 30.0
+        limit = max(limit, 0.05)
+
+        now = now_local()
+        next_delay: float | None = None
+        rows = database.fetch_all(
+            '''
+            SELECT *
+            FROM reservation_tasks
+            WHERE status IN ('scheduled', 'holding')
+            ORDER BY target_time ASC, id ASC
+            '''
+        )
+
+        for row in rows:
+            task = ReservationTask.from_row(row)
+            start_at = task.start_at
+            hold_until = task.hold_until
+            if start_at is None or hold_until is None:
+                start_at, hold_until = build_windows(task.target_time, task.lead_minutes)
+
+            for deadline in (start_at, hold_until):
+                if deadline and deadline > now:
+                    delay = (deadline - now).total_seconds()
+                    if next_delay is None or delay < next_delay:
+                        next_delay = delay
+
+            if task.status != 'holding':
+                continue
+
+            snapshot = self._deserialize_current_order(task.current_order_snapshot)
+            if self._classify_order_detail(snapshot or {}) != 'pending':
+                continue
+
+            early_renew_at = self._get_snapshot_early_renew_at(snapshot)
+            if early_renew_at and early_renew_at > now:
+                delay = (early_renew_at - now).total_seconds()
+                if next_delay is None or delay < next_delay:
+                    next_delay = delay
+
+        if next_delay is None:
+            return limit
+        return max(0.05, min(limit, next_delay))
+
     def process_due_tasks(self) -> Dict[str, int]:
         settings = settings_store.get_effective_settings()
         token = settings.token
@@ -1245,6 +1308,131 @@ class ReservationService:
                     )
                 if task.status != 'holding':
                     self._update_task(task.id, status='holding')
+                if self._is_early_renew_due(snapshot, now):
+                    previous_order_no = str(task.active_order_no or '').strip()
+                    refreshed_detail = self._retry_order_detail(client, previous_order_no)
+                    if not refreshed_detail:
+                        self._update_task(
+                            task.id,
+                            current_order_snapshot=self._serialize_current_order(snapshot) if snapshot else None,
+                            last_checked_at=to_iso(now),
+                            last_error='订单已到提前换单时间，但刷新旧订单状态失败。',
+                        )
+                        self._record_event(
+                            task.id,
+                            'order_early_refresh_failed',
+                            '订单已到提前换单时间，但刷新旧订单状态失败。',
+                            {'orderNo': previous_order_no},
+                        )
+                        continue
+                    snapshot = self._normalize_current_order(refreshed_detail)
+                    classification = self._classify_order_detail(refreshed_detail)
+                    self._update_task(
+                        task.id,
+                        current_order_snapshot=self._serialize_current_order(snapshot),
+                        last_checked_at=to_iso(now),
+                        last_error=None,
+                    )
+                    if classification == 'pending' and self._is_early_renew_due(snapshot, now):
+                        cancel_res = client.cancel_order(previous_order_no)
+                        refreshed_old_detail = self._retry_order_detail(client, previous_order_no, until_closed=True)
+                        if refreshed_old_detail:
+                            snapshot = self._normalize_current_order(refreshed_old_detail)
+                            classification = self._classify_order_detail(refreshed_old_detail)
+                            self._update_task(
+                                task.id,
+                                current_order_snapshot=self._serialize_current_order(snapshot),
+                                last_checked_at=to_iso(now),
+                                last_error=None,
+                            )
+                            self._sync_workflow_process(token, previous_order_no)
+
+                        if classification == 'closed':
+                            ok, result, recreate_detail, source = self._create_pending_order(
+                                task,
+                                token,
+                                excluded_order_nos={previous_order_no},
+                            )
+                            if not ok:
+                                self._update_task(
+                                    task.id,
+                                    status='scheduled',
+                                    active_order_no=None,
+                                    current_order_snapshot=None,
+                                    last_checked_at=to_iso(now),
+                                    last_error=str(result),
+                                )
+                                self._record_event(
+                                    task.id,
+                                    'order_early_recreate_failed',
+                                    '提前换单后新订单创建失败，等待下一轮重试。',
+                                    {'orderNo': previous_order_no, 'detail': recreate_detail, 'reason': str(result)},
+                                )
+                                continue
+
+                            order_no = str(result)
+                            current_order_snapshot = self._serialize_current_order(
+                                self._normalize_current_order(recreate_detail if isinstance(recreate_detail, dict) else {})
+                            )
+                            process_id = self._ensure_process_for_task(task, token, order_no, recreate_detail if isinstance(recreate_detail, dict) else None)
+                            if source == 'adopted':
+                                adopted_count += 1
+                                self._update_task(
+                                    task.id,
+                                    status='holding',
+                                    active_order_no=order_no,
+                                    current_order_snapshot=current_order_snapshot,
+                                    last_checked_at=to_iso(now),
+                                    last_run_at=to_iso(now),
+                                    last_error=None,
+                                )
+                                self._record_event(
+                                    task.id,
+                                    'existing_order_early_adopted',
+                                    '提前换单后，接管了当前机器上的新最终待付款订单。',
+                                    {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
+                                )
+                                self._notify('预约已提前接管现有订单', f'{task.title}\n订单号：{order_no}')
+                                continue
+
+                            recreated_count += 1
+                            self._update_task(
+                                task.id,
+                                status='holding',
+                                active_order_no=order_no,
+                                current_order_snapshot=current_order_snapshot,
+                                last_checked_at=to_iso(now),
+                                last_run_at=to_iso(now),
+                                last_error=None,
+                            )
+                            self._record_event(
+                                task.id,
+                                'order_early_recreated',
+                                '已在旧订单失效前提前换单，并进入待付款状态。',
+                                {'orderNo': order_no, 'previousOrderNo': previous_order_no, 'processId': process_id},
+                            )
+                            self._notify('预约订单已提前换单', f'{task.title}\n新订单号：{order_no}')
+                            continue
+
+                        if classification == 'pending':
+                            cancel_error = cancel_res.get('msg') or '提前换单失败，旧订单尚未关闭。'
+                            self._update_task(
+                                task.id,
+                                current_order_snapshot=self._serialize_current_order(snapshot) if snapshot else None,
+                                last_checked_at=to_iso(now),
+                                last_error=cancel_error,
+                            )
+                            self._record_event(
+                                task.id,
+                                'order_early_cancel_failed',
+                                '提前换单失败，旧订单尚未关闭。',
+                                {
+                                    'orderNo': previous_order_no,
+                                    'reason': cancel_error,
+                                    'cancelResult': cancel_res.get('raw'),
+                                },
+                            )
+                            continue
                 invalid_at = self._get_snapshot_invalid_at(snapshot)
                 if invalid_at and now < invalid_at:
                     continue

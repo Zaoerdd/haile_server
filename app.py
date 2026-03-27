@@ -754,6 +754,7 @@ def create_reservation():
         task = reservation_service.create_task(data)
     except ValueError as exc:
         return json_error(str(exc), error_type='invalid_reservation')
+    reservation_scheduler.wake()
     return jsonify({'status': 'success', 'msg': '预约任务已创建。', 'task': task})
 
 
@@ -763,6 +764,7 @@ def pause_reservation(task_id: int):
         task = reservation_service.pause_task(task_id)
     except ValueError as exc:
         return json_error(str(exc), error_type='reservation_not_found', status_code=404)
+    reservation_scheduler.wake()
     return jsonify({'status': 'success', 'msg': '预约任务已暂停。', 'task': task})
 
 
@@ -772,6 +774,7 @@ def resume_reservation(task_id: int):
         task = reservation_service.resume_task(task_id)
     except ValueError as exc:
         return json_error(str(exc), error_type='invalid_reservation', status_code=400)
+    reservation_scheduler.wake()
     return jsonify({'status': 'success', 'msg': '预约任务已恢复。', 'task': task})
 
 
@@ -781,6 +784,7 @@ def delete_reservation(task_id: int):
         result = reservation_service.delete_task(task_id)
     except ValueError as exc:
         return json_error(str(exc), error_type='reservation_not_found', status_code=404)
+    reservation_scheduler.wake()
     return jsonify({'status': 'success', 'msg': '预约任务已删除。', 'task': result})
 
 
