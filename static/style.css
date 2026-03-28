@@ -92,15 +92,38 @@ label > select {
     width: min(100%, 640px);
     margin: 0 auto;
     min-height: 100vh;
-    padding: max(16px, env(safe-area-inset-top)) 14px calc(142px + env(safe-area-inset-bottom));
+    padding: max(16px, env(safe-area-inset-top)) 14px calc(104px + env(safe-area-inset-bottom));
 }
 
 .topbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
     margin-bottom: 14px;
+}
+
+.topbar-status-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px 10px;
+    margin-left: auto;
+    max-width: min(100%, 240px);
+}
+
+.topbar-refresh-text {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: right;
+}
+
+.topbar-refresh-text.loading {
+    color: var(--primary);
 }
 
 .eyebrow {
@@ -820,42 +843,6 @@ label > select {
     color: #f7fcff;
 }
 
-.floating-refresh {
-    position: fixed;
-    left: 50%;
-    bottom: calc(82px + env(safe-area-inset-bottom));
-    transform: translateX(-50%);
-    width: min(calc(100% - 28px), 320px);
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 10px 14px;
-    border-radius: 18px;
-    background: rgba(255, 255, 255, 0.78);
-    border: 1px solid rgba(255, 255, 255, 0.72);
-    box-shadow: 0 18px 40px rgba(66, 118, 149, 0.18);
-    backdrop-filter: blur(18px);
-    z-index: 1000;
-    text-align: left;
-}
-
-.floating-refresh:disabled {
-    opacity: 0.72;
-}
-
-.floating-refresh-label {
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 800;
-}
-
-.floating-refresh-meta {
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.35;
-}
-
 .toast {
     position: fixed;
     top: calc(max(16px, env(safe-area-inset-top)) + 60px);
@@ -1010,9 +997,12 @@ label > select {
         flex-basis: auto;
     }
 
-    .floating-refresh {
-        width: calc(100% - 24px);
-        bottom: calc(78px + env(safe-area-inset-bottom));
+    .topbar {
+        gap: 12px;
+    }
+
+    .topbar-status-group {
+        max-width: none;
     }
 
     .toast {

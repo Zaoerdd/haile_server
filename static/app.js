@@ -80,6 +80,7 @@ const state = {
         liveClockTimer: null,
         ordersOverviewRefreshPromise: null,
         activeRefreshPromise: null,
+        pendingRefreshRequest: null,
         autoRefreshTimer: null,
     },
 };
@@ -169,6 +170,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 function bindElements() {
     el.pageTitle = document.getElementById('pageTitle');
     el.topStatus = document.getElementById('topStatus');
+    el.topRefreshStatus = document.getElementById('topRefreshStatus');
     el.tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
     el.tabButtons = Array.from(document.querySelectorAll('.tabbar-btn'));
     el.toast = document.getElementById('toast');
@@ -210,19 +212,19 @@ function bindElements() {
     el.settingsLeadMinutes = document.getElementById('settingsLeadMinutes');
     el.settingsPollInterval = document.getElementById('settingsPollInterval');
     el.settingsInfo = document.getElementById('settingsInfo');
-    el.globalRefreshBtn = document.getElementById('globalRefreshBtn');
-    el.globalRefreshLabel = document.getElementById('globalRefreshLabel');
-    el.globalRefreshMeta = document.getElementById('globalRefreshMeta');
 }
 
 function bindEvents() {
     el.tabButtons.forEach(button => {
-        button.addEventListener('click', () => switchTab(button.dataset.tab));
-    });
-
-    el.globalRefreshBtn.addEventListener('click', () => {
-        refreshActiveTab({ reason: 'manual', silent: false, force: true }).catch(error => {
-            handleRequestError(error, '刷新页面失败。', true);
+        button.addEventListener('click', () => {
+            const tabId = button.dataset.tab;
+            if (tabId === state.activeTab) {
+                refreshActiveTab({ reason: 'manual', silent: false, force: true }).catch(error => {
+                    handleRequestError(error, '刷新页面失败。', true);
+                });
+                return;
+            }
+            switchTab(tabId);
         });
     });
 
@@ -382,38 +384,26 @@ function markTabRefreshed(tabId, refreshedAt = Date.now()) {
 
 function formatRefreshTimestamp(value) {
     if (!value) {
-        return '尚未刷新';
+        return '未刷新';
     }
     const date = parseDateValue(value);
     if (!date) {
-        return '尚未刷新';
+        return '未刷新';
     }
-    return `${pad(date.getHours())}:${pad(date.getMinutes())} 更新`;
-}
-
-function refreshMetaText(tabId) {
-    const lastUpdatedText = formatRefreshTimestamp((state.refresh[tabId] || {}).lastRefreshedAt);
-    if (tabId === 'washTab') {
-        if (state.wash.view === 'scan') {
-            return `${lastUpdatedText} · 扫码流程仅手动刷新`;
-        }
-        return `${lastUpdatedText} · 可见时自动刷新`;
-    }
-    if (tabId === 'orderTab') {
-        return `${lastUpdatedText} · 可见时自动刷新`;
-    }
-    return `${lastUpdatedText} · 当前页支持手动刷新`;
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function renderGlobalRefresh() {
-    if (!el.globalRefreshBtn) {
+    if (!el.topRefreshStatus) {
         return;
     }
     const refreshState = getActiveRefreshState();
     const tabLabel = TAB_TITLES[state.activeTab] || '当前页';
-    el.globalRefreshLabel.textContent = refreshState.loading ? `正在刷新${tabLabel}` : `刷新${tabLabel}`;
-    el.globalRefreshMeta.textContent = refreshMetaText(state.activeTab);
-    el.globalRefreshBtn.disabled = Boolean(refreshState.loading);
+    const lastUpdatedText = formatRefreshTimestamp(refreshState.lastRefreshedAt);
+    el.topRefreshStatus.textContent = refreshState.loading
+        ? `${tabLabel} 刷新中 · ${lastUpdatedText}`
+        : `${tabLabel} ${lastUpdatedText === '未刷新' ? '未刷新' : `上次刷新 ${lastUpdatedText}`}`;
+    el.topRefreshStatus.classList.toggle('loading', Boolean(refreshState.loading));
 }
 
 function clearActiveAutoRefresh() {
@@ -501,11 +491,14 @@ async function refreshWashCurrentView(reason = 'manual') {
 }
 
 async function refreshActiveTab({ reason = 'manual', silent = false, force = false } = {}) {
+    const tabId = state.activeTab;
     if (state.ui.activeRefreshPromise) {
+        if (force) {
+            state.ui.pendingRefreshRequest = { tabId, reason, silent };
+        }
         return state.ui.activeRefreshPromise;
     }
 
-    const tabId = state.activeTab;
     const tokenRequired = tabId === 'washTab' || tabId === 'orderTab';
     if (tokenRequired && !isTokenReady()) {
         if (!silent) {
@@ -553,6 +546,15 @@ async function refreshActiveTab({ reason = 'manual', silent = false, force = fal
             }
             setTabRefreshing(tabId, false);
             scheduleActiveAutoRefresh();
+            const pendingRequest = state.ui.pendingRefreshRequest;
+            if (pendingRequest) {
+                state.ui.pendingRefreshRequest = null;
+            }
+            if (pendingRequest && pendingRequest.tabId === state.activeTab) {
+                refreshActiveTab({ ...pendingRequest, force: false }).catch(error => {
+                    handleRequestError(error, '刷新页面失败。', true);
+                });
+            }
         }
     })();
     state.ui.activeRefreshPromise = refreshPromise;
@@ -688,13 +690,11 @@ function switchTab(tabId, options = {}) {
         pushHistoryState();
     }
 
-    if (safeTab === 'reservationTab') {
-        loadReservations({ silent: true });
-    } else {
+    if (safeTab !== 'reservationTab') {
         clearReservationAutoRefresh();
     }
 
-    if (state.historyReady && options.refresh !== false && previousTab !== safeTab && AUTO_REFRESHABLE_TABS.has(safeTab)) {
+    if (state.historyReady && options.refresh !== false && previousTab !== safeTab) {
         refreshActiveTab({ reason: 'tab-switch', silent: true, force: true }).catch(error => {
             handleRequestError(error, '刷新页面失败。', true);
         });

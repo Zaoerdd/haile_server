@@ -13,7 +13,10 @@
                 <div class="eyebrow">Haier Laundry WebView</div>
                 <h1 id="pageTitle">洗衣</h1>
             </div>
-            <div id="topStatus" class="status-pill pending">未校验</div>
+            <div class="topbar-status-group">
+                <div id="topRefreshStatus" class="topbar-refresh-text">当前页未刷新</div>
+                <div id="topStatus" class="status-pill pending">未校验</div>
+            </div>
         </header>
 
         <main class="main-content">
@@ -144,10 +147,6 @@
             <button class="tabbar-btn" data-tab="orderTab" type="button">订单</button>
             <button class="tabbar-btn" data-tab="settingsTab" type="button">设置</button>
         </nav>
-        <button id="globalRefreshBtn" class="floating-refresh" type="button">
-            <span id="globalRefreshLabel" class="floating-refresh-label"></span>
-            <span id="globalRefreshMeta" class="floating-refresh-meta"></span>
-        </button>
     </div>
 
     <div id="toast" class="toast"></div>
