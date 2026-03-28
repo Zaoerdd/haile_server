@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>海乐洗衣助手</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ style_url }}">
 </head>
 <body>
     <div class="app-shell">
@@ -165,9 +165,10 @@
     <script>
         window.__APP_BOOTSTRAP__ = {
             allowRemote: {{ 'true' if allow_remote else 'false' }},
-            sslVerify: {{ 'true' if ssl_verify else 'false' }}
+            sslVerify: {{ 'true' if ssl_verify else 'false' }},
+            basePath: {{ base_path|tojson }}
         };
     </script>
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script src="{{ app_js_url }}"></script>
 </body>
 </html>

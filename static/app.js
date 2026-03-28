@@ -23,6 +23,8 @@ const DEFAULT_TOKEN_STATUS = {
 const VALID_TABS = new Set(Object.keys(TAB_TITLES));
 const AUTO_REFRESHABLE_TABS = new Set(['washTab', 'orderTab']);
 const AUTO_REFRESH_INTERVAL_MS = 30 * 1000;
+const BOOTSTRAP = window.__APP_BOOTSTRAP__ || {};
+const BASE_PATH = normalizeBasePath(BOOTSTRAP.basePath || '');
 
 const state = {
     activeTab: 'washTab',
@@ -93,6 +95,28 @@ const cache = {
 };
 
 const el = {};
+
+function normalizeBasePath(value) {
+    const raw = String(value || '').trim();
+    if (!raw || raw === '/') {
+        return '';
+    }
+    return `/${raw.replace(/^\/+|\/+$/g, '')}`;
+}
+
+function withBasePath(path) {
+    const raw = String(path || '');
+    if (!BASE_PATH || !raw || /^[a-z]+:\/\//i.test(raw) || raw.startsWith('//')) {
+        return raw;
+    }
+    if (raw === BASE_PATH || raw.startsWith(`${BASE_PATH}/`)) {
+        return raw;
+    }
+    if (raw.startsWith('/')) {
+        return `${BASE_PATH}${raw}`;
+    }
+    return `${BASE_PATH}/${raw.replace(/^\/+/, '')}`;
+}
 
 function displayProcessStepId(stepId) {
     const numericStep = Number(stepId || 0);
@@ -3079,7 +3103,7 @@ async function apiDelete(url) {
 }
 
 async function request(url, options) {
-    const response = await fetch(url, {
+    const response = await fetch(withBasePath(url), {
         headers: {
             Accept: 'application/json',
             ...(options && options.headers ? options.headers : {}),

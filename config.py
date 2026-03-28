@@ -44,6 +44,13 @@ def load_env_file() -> None:
 
 load_env_file()
 
+
+def normalize_base_path(value: str | None) -> str:
+    raw = (value or '').strip()
+    if not raw or raw == '/':
+        return ''
+    return '/' + raw.strip('/')
+
 DEFAULT_APP_VERSION = '2.5.9'
 DEFAULT_APP_TYPE = '2'
 DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
@@ -60,6 +67,7 @@ DEFAULT_LEAD_MINUTES = int(os.getenv('DEFAULT_LEAD_MINUTES', '60'))
 SCHEDULER_INTERVAL_SECONDS = int(os.getenv('SCHEDULER_INTERVAL_SECONDS', '30'))
 DEFAULT_LNG = float(os.getenv('DEFAULT_LNG', '113.999622'))
 DEFAULT_LAT = float(os.getenv('DEFAULT_LAT', '22.596488'))
+BASE_PATH = normalize_base_path(os.getenv('BASE_PATH', ''))
 BASE_URL = 'https://yshz-user.haier-ioc.com'
 
 if not SSL_VERIFY:

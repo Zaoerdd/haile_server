@@ -4,9 +4,10 @@ from datetime import datetime
 import time
 from typing import Any, Dict
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-from config import ALLOW_REMOTE, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines
+from config import ALLOW_REMOTE, BASE_PATH, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines, normalize_base_path
 from services.haier_client import HaierClient
 from services.reservation_service import reservation_service
 from services.scheduler import reservation_scheduler
@@ -15,10 +16,29 @@ from services.workflow import WorkflowManager
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
+if BASE_PATH:
+    app.config['APPLICATION_ROOT'] = BASE_PATH
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1, x_proto=1, x_prefix=1)
 
 workflow_manager = WorkflowManager()
 reservation_scheduler.update_interval(settings_store.get_effective_settings().reservation_poll_interval_seconds)
 reservation_scheduler.start()
+
+
+def get_base_path() -> str:
+    return (
+        normalize_base_path(request.headers.get('X-Forwarded-Prefix'))
+        or normalize_base_path(request.script_root)
+        or BASE_PATH
+    )
+
+
+def prefix_local_path(path: str, base_path: str) -> str:
+    if not base_path or not path.startswith('/'):
+        return path
+    if path == base_path or path.startswith(f'{base_path}/'):
+        return path
+    return f'{base_path}{path}'
 
 
 def json_error(msg: str, error_type: str = 'request_failed', status_code: int = 400, **extra: Any):
@@ -375,7 +395,15 @@ def fetch_all_room_machines(client: HaierClient, position_id: str, category_code
 
 @app.route('/')
 def index():
-    return render_template('index.html', allow_remote=ALLOW_REMOTE, ssl_verify=SSL_VERIFY)
+    base_path = get_base_path()
+    return render_template(
+        'index.html',
+        allow_remote=ALLOW_REMOTE,
+        ssl_verify=SSL_VERIFY,
+        base_path=base_path,
+        style_url=prefix_local_path(url_for('static', filename='style.css'), base_path),
+        app_js_url=prefix_local_path(url_for('static', filename='app.js'), base_path),
+    )
 
 
 @app.route('/api/config', methods=['GET'])
