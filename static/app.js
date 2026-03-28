@@ -1001,17 +1001,42 @@ function isTerminalHistoryOrder(order) {
     }
     const state = Number(order.state || 0);
     const stateDesc = String(order.stateDesc || '');
-    if (state === 411 || state === 1000) {
+    if (state === 401 || state === 411 || state === 1000) {
         return true;
-    }
-    if (state === 401) {
-        return stateDesc.includes('订单超时关闭');
     }
     return stateDesc.includes('已取消') || stateDesc.includes('已完成') || stateDesc.includes('订单超时关闭');
 }
 
+function shouldRefreshHistoryOrderDetail(order) {
+    if (!order || !order.orderNo) {
+        return false;
+    }
+    if (!isTerminalHistoryOrder(order)) {
+        return true;
+    }
+    const cachedDetail = cache.orderDetails.get(order.orderNo);
+    return Boolean(cachedDetail && !isTerminalHistoryOrder(cachedDetail));
+}
+
+function dropStaleTerminalOrderDetail(order) {
+    if (!order || !order.orderNo || !isTerminalHistoryOrder(order)) {
+        return;
+    }
+    const cachedDetail = cache.orderDetails.get(order.orderNo);
+    if (cachedDetail && !isTerminalHistoryOrder(cachedDetail)) {
+        cache.orderDetails.delete(order.orderNo);
+    }
+}
+
+function shouldUseHistoryOrderOverlay(order, overlay) {
+    if (!overlay) {
+        return false;
+    }
+    return !(isTerminalHistoryOrder(order) && !isTerminalHistoryOrder(overlay));
+}
+
 async function refreshVisibleOrderDetails(orders) {
-    const candidates = (orders || []).filter(order => order && order.orderNo && !isTerminalHistoryOrder(order));
+    const candidates = (orders || []).filter(shouldRefreshHistoryOrderDetail);
     if (!candidates.length) {
         return;
     }
@@ -1020,6 +1045,8 @@ async function refreshVisibleOrderDetails(orders) {
     results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
             updateOrderFromDetail(candidates[index].orderNo, result.value);
+        } else {
+            dropStaleTerminalOrderDetail(candidates[index]);
         }
     });
 }
@@ -2006,8 +2033,14 @@ function renderActiveProcessCard(process) {
 
 function renderHistoryOrderCard(order, activeProcess) {
     const expanded = Boolean(state.orders.expanded[order.orderNo]);
-    const processOrder = activeProcess ? (activeProcess.order || null) : null;
-    const detail = cache.orderDetails.get(order.orderNo);
+    const rawProcessOrder = activeProcess ? (activeProcess.order || null) : null;
+    const processOrder = shouldUseHistoryOrderOverlay(order, rawProcessOrder)
+        ? rawProcessOrder
+        : null;
+    const rawDetail = cache.orderDetails.get(order.orderNo);
+    const detail = shouldUseHistoryOrderOverlay(order, rawDetail)
+        ? rawDetail
+        : null;
     const mergedOrder = {
         ...(order || {}),
         ...(processOrder || {}),
@@ -2621,6 +2654,10 @@ function updateOrderFromDetail(orderNo, detail) {
     if (!item || !detail) {
         return;
     }
+    if (isTerminalHistoryOrder(item) && !isTerminalHistoryOrder(detail)) {
+        cache.orderDetails.delete(orderNo);
+        return;
+    }
     item.state = detail.state;
     item.stateDesc = detail.stateDesc;
     item.pageCode = detail.pageCode;
@@ -2742,15 +2779,23 @@ function formatCountdown(targetTime, expiredLabel = '已到期') {
 }
 
 function isPendingOrder(order) {
+    if (!order || isTerminalHistoryOrder(order)) {
+        return false;
+    }
     const stateCode = Number(order && order.state);
     const stateDesc = String((order && order.stateDesc) || '');
     const pageCode = String((order && order.pageCode) || '');
     const buttonSwitch = (order && order.buttonSwitch) || {};
-    return stateCode === 50
+    const invalidTime = parseDateValue(order && order.invalidTime);
+    const hasPendingSignals = stateCode === 50
         || Boolean(buttonSwitch.canPay)
         || stateDesc.includes('待支付')
         || stateDesc.includes('待验证')
         || ['waiting_check', 'place_clothes', 'waiting_choose_ump'].includes(pageCode);
+    if (!hasPendingSignals) {
+        return false;
+    }
+    return !(invalidTime && invalidTime.getTime() <= Date.now());
 }
 
 function isRunningOrder(order) {
