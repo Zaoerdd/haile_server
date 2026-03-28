@@ -40,6 +40,10 @@ MACHINE_IDENTIFIER_KEYS = {
 NO_ADOPTABLE_PENDING_ORDER_MESSAGE = '没有找到可接手的最终待付款订单。'
 HISTORY_ORDER_LOOKUP_PAGE_SIZE = 20
 EARLY_RENEW_LEAD_SECONDS = 60
+try:
+    REMOTE_ORDER_TIMEZONE = ZoneInfo('Asia/Shanghai')
+except ZoneInfoNotFoundError:
+    REMOTE_ORDER_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def now_local() -> datetime:
@@ -58,6 +62,15 @@ def parse_iso(value: str | None) -> datetime | None:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=now_local().tzinfo)
+    return parsed.astimezone()
+
+
+def parse_remote_order_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=REMOTE_ORDER_TIMEZONE).astimezone()
     return parsed.astimezone()
 
 
@@ -351,7 +364,7 @@ class ReservationService:
     def _get_snapshot_invalid_at(self, snapshot: Dict[str, Any] | None) -> datetime | None:
         if not snapshot:
             return None
-        return parse_iso(str(snapshot.get('invalidTime') or '').strip() or None)
+        return parse_remote_order_time(str(snapshot.get('invalidTime') or '').strip() or None)
 
     def _get_snapshot_early_renew_at(self, snapshot: Dict[str, Any] | None) -> datetime | None:
         invalid_at = self._get_snapshot_invalid_at(snapshot)
@@ -359,7 +372,11 @@ class ReservationService:
             return None
         return invalid_at - timedelta(seconds=EARLY_RENEW_LEAD_SECONDS)
 
-    def _is_early_renew_due(self, snapshot: Dict[str, Any] | None, reference: datetime | None = None) -> bool:
+    def _is_early_renew_due(
+        self,
+        snapshot: Dict[str, Any] | None,
+        reference: datetime | None = None,
+    ) -> bool:
         invalid_at = self._get_snapshot_invalid_at(snapshot)
         early_renew_at = self._get_snapshot_early_renew_at(snapshot)
         if invalid_at is None or early_renew_at is None:

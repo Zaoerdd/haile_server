@@ -37,7 +37,7 @@ def build_order_detail(
     state: int = 50,
     state_desc: str = 'pending',
     page_code: str = 'waiting_choose_ump',
-    invalid_time: datetime | None = None,
+    invalid_time: datetime | str | None = None,
     can_pay: bool = True,
     can_cancel: bool = True,
     can_close: bool = False,
@@ -66,7 +66,9 @@ def build_order_detail(
             }
         ],
     }
-    if invalid_time is not None:
+    if isinstance(invalid_time, str):
+        detail['invalidTime'] = invalid_time
+    elif invalid_time is not None:
         detail['invalidTime'] = invalid_time.isoformat()
     return detail
 
@@ -340,6 +342,64 @@ class ReservationEarlyRenewTests(unittest.TestCase):
         update_task_mock.assert_any_call(1, last_checked_at=ANY, last_error=None)
         event_types = [call.args[1] for call in record_event_mock.call_args_list]
         self.assertNotIn('order_early_recreated', event_types)
+
+    def test_early_renew_uses_shanghai_time_for_naive_invalid_time_under_utc_runtime(self):
+        now = datetime(2026, 3, 27, 17, 32, 30, tzinfo=timezone.utc)
+        target_time = datetime(2026, 3, 27, 18, 20, 0, tzinfo=timezone.utc)
+        start_at = datetime(2026, 3, 27, 17, 20, 0, tzinfo=timezone.utc)
+        hold_until = datetime(2026, 3, 27, 18, 30, 0, tzinfo=timezone.utc)
+        old_pending_detail = build_order_detail(
+            order_no='old-order',
+            invalid_time='2026-03-28 01:33:01',
+        )
+        old_closed_detail = build_order_detail(
+            order_no='old-order',
+            state=401,
+            state_desc='closed',
+            page_code='',
+            invalid_time='2026-03-28 01:33:01',
+            can_pay=False,
+            can_cancel=False,
+            can_close=False,
+        )
+        task_row = build_task_row(
+            status='holding',
+            target_time=target_time,
+            start_at=start_at,
+            hold_until=hold_until,
+            current_order=build_order_snapshot(old_pending_detail),
+            active_order_no='old-order',
+        )
+        client = MagicMock()
+
+        with patch('services.reservation_service.now_local', return_value=now), \
+            patch('services.reservation_service.database.fetch_all', return_value=[task_row]), \
+            patch('services.reservation_service.settings_store.get_effective_settings', return_value=types.SimpleNamespace(token='token')), \
+            patch('services.reservation_service.HaierClient', return_value=client), \
+            patch.object(reservation_service, '_retry_order_detail', side_effect=[old_pending_detail, old_closed_detail]) as retry_mock, \
+            patch.object(reservation_service, '_create_pending_order', return_value=(True, 'new-order', self.new_pending_detail, 'created')) as create_mock, \
+            patch.object(reservation_service, '_update_task') as update_task_mock, \
+            patch.object(reservation_service, '_record_event') as record_event_mock, \
+            patch.object(reservation_service, '_notify'), \
+            patch.object(reservation_service, '_ensure_process_for_task', return_value=None), \
+            patch.object(reservation_service, '_sync_workflow_process'):
+            result = reservation_service.process_due_tasks()
+
+        self.assertEqual(result['recreated'], 1)
+        client.cancel_order.assert_called_once_with('old-order')
+        retry_mock.assert_called()
+        create_mock.assert_called_once()
+        update_task_mock.assert_any_call(
+            1,
+            status='holding',
+            active_order_no='new-order',
+            current_order_snapshot=ANY,
+            last_checked_at=ANY,
+            last_run_at=ANY,
+            last_error=None,
+        )
+        event_types = [call.args[1] for call in record_event_mock.call_args_list]
+        self.assertIn('order_early_recreated', event_types)
 
 
 if __name__ == '__main__':
