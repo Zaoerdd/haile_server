@@ -1146,6 +1146,45 @@ label > select {
         grid-row: 1 / span 2;
         align-self: center;
     }
+
+    #washTab {
+        overflow-x: hidden;
+    }
+
+    #washTab .row-card {
+        grid-template-columns: minmax(0, 1fr);
+        align-items: start;
+    }
+
+    #washTab .row-card > .card-icon {
+        display: none;
+    }
+
+    #washTab .compact-main h3,
+    #washTab .row-card-head h4,
+    #washTab .row-card-subtitle,
+    #washTab .compact-side-value {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+    }
+
+    #washTab .compact-summary-side {
+        width: 100%;
+        max-width: 100%;
+        justify-items: start;
+        text-align: left;
+    }
+
+    #washTab .category-menu {
+        margin-left: -2px;
+        margin-right: -2px;
+        padding-bottom: 4px;
+    }
+
+    #washTab .category-menu-btn {
+        min-width: 84px;
+        padding: 8px 10px;
+    }
 }
 
 @media (max-width: 420px) {
