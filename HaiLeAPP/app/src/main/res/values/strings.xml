@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">HaiLe</string>
+    <string name="splash_status">智慧洗护助手</string>
+    <string name="action_skip">跳过</string>
+    <string name="web_home_url">http://8.135.10.38:8080/haile/</string>
+    <string name="back_again_to_exit">Press back again to exit.</string>
+    <string name="error_console_title">Unable to reach HaiLe console</string>
+    <string name="error_console_message">The server may be offline, or the network connection is unstable.</string>
+    <string name="error_console_retry">Retry</string>
+    <string name="toast_server_unreachable">Unable to reach the server. Please check the network and try again.</string>
 </resources>

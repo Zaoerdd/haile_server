@@ -3,14 +3,15 @@ package com.example.haile;
 import android.annotation.SuppressLint;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.TextUtils;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JsResult;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
-import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebChromeClient;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
@@ -20,13 +21,13 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String HOME_URL = "http://8.135.10.38:8080";
     private static final String RETRY_SCHEME = "haile://retry";
     private static final long EXIT_INTERVAL_MS = 2000L;
 
     private WebView myWebView;
     private SwipeRefreshLayout swipeRefreshLayout;
-    private String lastRequestedUrl = HOME_URL;
+    private String homeUrl;
+    private String lastRequestedUrl;
     private long lastBackPressedAt = 0L;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -35,13 +36,16 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        homeUrl = getString(R.string.web_home_url);
+        lastRequestedUrl = homeUrl;
+
         swipeRefreshLayout = findViewById(R.id.swipe_refresh);
         myWebView = findViewById(R.id.webview);
 
         setupSwipeRefresh();
         setupWebView();
         setupBackNavigation();
-        loadUrl(HOME_URL);
+        loadUrl(homeUrl);
     }
 
     private void setupSwipeRefresh() {
@@ -54,11 +58,16 @@ public class MainActivity extends AppCompatActivity {
         swipeRefreshLayout.setOnChildScrollUpCallback((parent, child) -> myWebView.getScrollY() > 0);
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         WebSettings webSettings = myWebView.getSettings();
         webSettings.setJavaScriptEnabled(true);
         webSettings.setDomStorageEnabled(true);
         webSettings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        webSettings.setLoadWithOverviewMode(true);
+        webSettings.setUseWideViewPort(true);
+        webSettings.setMediaPlaybackRequiresUserGesture(false);
+
         myWebView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
@@ -103,7 +112,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
-                if (url != null && !url.startsWith("data:") && !url.startsWith("about:")) {
+                if (!TextUtils.isEmpty(url) && !url.startsWith("data:") && !url.startsWith("about:")) {
                     lastRequestedUrl = url;
                 }
             }
@@ -117,8 +126,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
-                if (request.isForMainFrame()) {
-                    lastRequestedUrl = normalizeUrl(request.getUrl().toString());
+                if (request != null && request.isForMainFrame()) {
+                    lastRequestedUrl = normalizeUrl(request.getUrl() != null ? request.getUrl().toString() : null);
                     showErrorPage(view);
                 }
             }
@@ -144,23 +153,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String normalizeUrl(String url) {
-        if (url == null || url.isBlank() || url.startsWith("data:") || url.startsWith("about:")) {
-            return HOME_URL;
+        if (TextUtils.isEmpty(url) || url.startsWith("data:") || url.startsWith("about:")) {
+            return homeUrl;
         }
         return url;
     }
 
     private void showErrorPage(WebView view) {
         swipeRefreshLayout.setRefreshing(false);
-        String errorHtml = "<html><body style='margin:0;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;font-family:sans-serif;background:#f7f8fa;color:#1f2937;'>"
-                + "<div style='text-align:center;padding:24px;'>"
-                + "<div style='font-size:48px;'>!</div>"
-                + "<h2 style='margin:16px 0 8px;'>Unable to reach the console</h2>"
-                + "<p style='margin:0 0 20px;color:#6b7280;'>The server may be offline, or the network connection is unstable.</p>"
-                + "<button onclick=\"window.location.href='" + RETRY_SCHEME + "'\" style='padding:10px 20px;background:#2196F3;color:white;border:none;border-radius:999px;font-size:16px;'>Retry</button>"
+        String errorHtml = "<html><body style='margin:0;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;font-family:sans-serif;background:#071b31;color:#eaf4ff;'>"
+                + "<div style='text-align:center;padding:24px;max-width:320px;'>"
+                + "<div style='width:72px;height:72px;margin:0 auto 18px;border-radius:24px;background:linear-gradient(135deg,#0f4d79,#08233f);box-shadow:0 16px 40px rgba(3,20,38,0.35);display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;'>HL</div>"
+                + "<h2 style='margin:0 0 10px;font-size:22px;'>" + getString(R.string.error_console_title) + "</h2>"
+                + "<p style='margin:0 0 22px;color:#a9ddff;line-height:1.6;'>" + getString(R.string.error_console_message) + "</p>"
+                + "<button onclick=\"window.location.href='" + RETRY_SCHEME + "'\" style='padding:12px 22px;background:#4fb1ff;color:#08233f;border:none;border-radius:999px;font-size:16px;font-weight:700;'>" + getString(R.string.error_console_retry) + "</button>"
                 + "</div></body></html>";
         view.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null);
-        Toast.makeText(this, "Unable to reach the server. Please check the network and try again.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, getString(R.string.toast_server_unreachable), Toast.LENGTH_LONG).show();
     }
 
     private void setupBackNavigation() {
@@ -179,8 +188,16 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 lastBackPressedAt = now;
-                Toast.makeText(MainActivity.this, "再按一次退出", Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this, getString(R.string.back_again_to_exit), Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (myWebView != null) {
+            myWebView.destroy();
+        }
+        super.onDestroy();
     }
 }

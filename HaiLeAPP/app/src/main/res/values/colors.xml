@@ -2,4 +2,22 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="haile_bg_top">#F9FDFF</color>
+    <color name="haile_bg_mid">#EAF6FB</color>
+    <color name="haile_bg_bottom">#DDECF6</color>
+    <color name="haile_panel_0">#FDFEFF</color>
+    <color name="haile_panel_1">#EDF8FD</color>
+    <color name="haile_panel_2">#D7ECF8</color>
+    <color name="haile_panel_3">#C4DFF0</color>
+    <color name="haile_primary">#2792DC</color>
+    <color name="haile_primary_soft">#7BC4F6</color>
+    <color name="haile_secondary">#27B3CA</color>
+    <color name="haile_text">#173247</color>
+    <color name="haile_muted">#648196</color>
+    <color name="haile_ring_light">#FAFDFF</color>
+    <color name="haile_ring_mid">#C5D3DF</color>
+    <color name="haile_ring_shadow">#93A7B7</color>
+    <color name="haile_ring_edge">#E8F1F7</color>
+    <color name="haile_skip_bg">#CFEAFA</color>
+    <color name="haile_skip_stroke">#6FB8E8</color>
 </resources>

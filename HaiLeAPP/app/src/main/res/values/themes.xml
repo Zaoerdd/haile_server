@@ -1,9 +1,18 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
     <style name="Base.Theme.HaiLe" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+        <item name="colorPrimary">@color/haile_primary</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSurface">@color/haile_panel_0</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/haile_bg_bottom</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 
     <style name="Theme.HaiLe" parent="Base.Theme.HaiLe" />
+
+    <style name="Theme.HaiLe.Splash" parent="Theme.HaiLe">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/haile_bg_bottom</item>
+    </style>
 </resources>
