@@ -391,6 +391,18 @@ class WorkflowManager:
             self._save_state(state)
             return order_state_result
 
+        if state.current_step in {1, 2, 3}:
+            result = self._execute_phase_one(state, client, token)
+            state.updated_at = now_iso()
+            self._save_state(state)
+            return result
+
+        if state.current_step in {4, 5}:
+            result = self._execute_phase_two(state, client)
+            state.updated_at = now_iso()
+            self._save_state(state)
+            return result
+
         validation_error = self._validate_preconditions(state)
         if validation_error:
             return validation_error
@@ -410,6 +422,228 @@ class WorkflowManager:
         state.updated_at = now_iso()
         self._save_state(state)
         return result
+
+    def _execute_single_step(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
+        validation_error = self._validate_preconditions(state)
+        if validation_error:
+            return validation_error
+
+        handlers = {
+            1: self._step_scan,
+            2: self._step_create_order,
+            3: self._step_place_clothes,
+            4: self._step_prepare_payment,
+            5: self._step_pay,
+        }
+        handler = handlers.get(state.current_step)
+        if not handler:
+            return self._error('invalid_step', f'未知步骤：{state.current_step}', state)
+        return handler(state, client)
+
+    def _execute_phase_one(self, state: ProcessState, client: HaierClient, token: str) -> Dict[str, Any]:
+        phase_debug: List[Dict[str, Any]] = []
+
+        while state.current_step in {1, 2, 3} and not state.completed and not state.terminated:
+            failed_step = state.current_step
+            result = self._execute_single_step(state, client)
+            phase_debug.append(
+                {
+                    'step': failed_step,
+                    'status': result.get('status'),
+                    'msg': result.get('msg'),
+                    'debug': result.get('debug'),
+                }
+            )
+            if result.get('status') != 'success':
+                rollback = self._rollback_phase_one(state, token)
+                if rollback.get('status') != 'success':
+                    result['msg'] = rollback.get('msg') or result.get('msg')
+                    result['errorType'] = rollback.get('errorType', result.get('errorType', 'request_failed'))
+                result['process'] = state.to_dict()
+                result['debug'] = {
+                    'phase': 'phase_one',
+                    'failedStep': failed_step,
+                    'stepDebug': result.get('debug'),
+                    'rollback': rollback,
+                    'steps': phase_debug,
+                }
+                return result
+
+        if state.completed:
+            return self._success(
+                state,
+                '第一阶段完成：订单已自动启动。',
+                {'phase': 'phase_one', 'steps': phase_debug},
+            )
+
+        state.current_step = 4
+        state.completed = False
+        state.terminated = False
+        state.blocked_reason = None
+        return self._success(
+            state,
+            '第一阶段完成：订单已进入待付款状态。',
+            {'phase': 'phase_one', 'steps': phase_debug},
+        )
+
+    def _execute_phase_two(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
+        phase_debug: List[Dict[str, Any]] = []
+
+        while state.current_step in {4, 5} and not state.completed and not state.terminated:
+            failed_step = state.current_step
+            result = self._execute_single_step(state, client)
+            phase_debug.append(
+                {
+                    'step': failed_step,
+                    'status': result.get('status'),
+                    'msg': result.get('msg'),
+                    'debug': result.get('debug'),
+                }
+            )
+            if result.get('status') != 'success':
+                rollback = self._rollback_phase_two(state, client)
+                if rollback.get('outcome') == 'completed':
+                    return self._success(
+                        state,
+                        '第二阶段完成：支付成功，设备已启动。',
+                        {
+                            'phase': 'phase_two',
+                            'failedStep': failed_step,
+                            'stepDebug': result.get('debug'),
+                            'rollback': rollback,
+                            'steps': phase_debug,
+                        },
+                    )
+                if rollback.get('status') != 'success':
+                    result['msg'] = rollback.get('msg') or result.get('msg')
+                    result['errorType'] = rollback.get('errorType', result.get('errorType', 'request_failed'))
+                result['process'] = state.to_dict()
+                result['debug'] = {
+                    'phase': 'phase_two',
+                    'failedStep': failed_step,
+                    'stepDebug': result.get('debug'),
+                    'rollback': rollback,
+                    'steps': phase_debug,
+                }
+                return result
+
+        if state.completed:
+            return self._success(
+                state,
+                '第二阶段完成：支付成功，设备已启动。',
+                {'phase': 'phase_two', 'steps': phase_debug},
+            )
+
+        return self._error(
+            'phase_incomplete',
+            '第二阶段结束后流程仍未完成，请稍后重试。',
+            state,
+            {'phase': 'phase_two', 'steps': phase_debug},
+        )
+
+    def _rollback_phase_one(self, state: ProcessState, token: str) -> Dict[str, Any]:
+        order_no = str(state.context.get('order_no') or '').strip()
+        cleanup_result: Optional[Dict[str, Any]] = None
+        if order_no:
+            cleanup_result = self.cleanup_order_by_no(token=token, order_no=order_no)
+            if cleanup_result.get('status') != 'success':
+                state.completed = False
+                state.terminated = True
+                state.blocked_reason = '第一阶段失败，且无法自动清理已创建订单，请先在订单页处理后再重试。'
+                return {
+                    'status': 'error',
+                    'errorType': 'phase_one_rollback_failed',
+                    'msg': state.blocked_reason,
+                    'cleanup': cleanup_result,
+                }
+
+        state.current_step = 1
+        state.completed = False
+        state.terminated = False
+        state.blocked_reason = None
+        state.context = {}
+        return {
+            'status': 'success',
+            'outcome': 'reset',
+            'msg': '已回退到第一阶段起点。',
+            'cleanup': cleanup_result,
+        }
+
+    def _rollback_phase_two(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
+        order_no = str(state.context.get('order_no') or '').strip()
+        if not order_no:
+            state.current_step = 4
+            state.completed = False
+            state.terminated = False
+            state.blocked_reason = None
+            state.context['prepay_param'] = None
+            return {
+                'status': 'success',
+                'outcome': 'reset',
+                'msg': '已回退到第二阶段起点。',
+            }
+
+        detail_res = client.order_detail(order_no)
+        if not detail_res.get('ok'):
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '第二阶段失败，且暂时无法确认订单状态，请先在订单页确认后再重试。'
+            return {
+                'status': 'error',
+                'errorType': 'phase_two_rollback_failed',
+                'msg': state.blocked_reason,
+                'orderDetail': detail_res.get('raw'),
+            }
+
+        detail = detail_res.get('data') or {}
+        classification = self._classify_order_detail(detail)
+        if classification in {'running', 'completed'}:
+            self._hydrate_context_from_detail(state, detail)
+            state.current_step = 6
+            state.completed = True
+            state.terminated = False
+            state.blocked_reason = None
+            return {
+                'status': 'success',
+                'outcome': 'completed',
+                'msg': '订单实际上已完成，无需回退。',
+                'orderDetail': detail_res.get('raw'),
+            }
+
+        if classification == 'closed':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '订单已关闭或失效，流程无法继续。'
+            return {
+                'status': 'success',
+                'outcome': 'terminated',
+                'msg': state.blocked_reason,
+                'orderDetail': detail_res.get('raw'),
+            }
+
+        if classification == 'manual_check_required':
+            state.completed = False
+            state.terminated = True
+            state.blocked_reason = '当前订单进入门店详情下单的待验证阶段，不能继续按扫码下单流程推进。'
+            return {
+                'status': 'success',
+                'outcome': 'terminated',
+                'msg': state.blocked_reason,
+                'orderDetail': detail_res.get('raw'),
+            }
+
+        self._hydrate_context_from_detail(state, detail)
+        state.current_step = 4
+        state.completed = False
+        state.terminated = False
+        state.blocked_reason = None
+        state.context['prepay_param'] = None
+        return {
+            'status': 'success',
+            'outcome': 'reset',
+            'msg': '已回退到第二阶段起点。',
+            'orderDetail': detail_res.get('raw'),
+        }
 
     def cleanup_machine_orders(self, token: str, qr_code: str) -> Dict[str, Any]:
         client = HaierClient(token)

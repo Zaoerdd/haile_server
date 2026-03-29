@@ -6,10 +6,8 @@
 };
 
 const PROCESS_STEPS = [
-    { id: 1, label: '解析机器', hint: '确认当前二维码对应的设备信息', backendSteps: [1] },
-    { id: 2, label: '创建订单', hint: '创建待支付订单，订单页可继续流程', backendSteps: [2] },
-    { id: 3, label: '确认放衣', hint: '放入衣物并确认关门', backendSteps: [3] },
-    { id: 4, label: '付款', hint: '生成支付参数并完成支付', backendSteps: [4, 5] },
+    { id: 1, label: '创建到待付款', hint: '解析机器、创建订单并确认放衣，直到进入待付款状态', backendSteps: [1, 2, 3] },
+    { id: 2, label: '支付并启动', hint: '生成支付参数并完成支付启动', backendSteps: [4, 5] },
 ];
 
 const DEFAULT_TOKEN_STATUS = {
@@ -120,8 +118,9 @@ function withBasePath(path) {
 
 function displayProcessStepId(stepId) {
     const numericStep = Number(stepId || 0);
-    if (numericStep === 5) {
-        return 4;
+    const displayStep = PROCESS_STEPS.find(step => (step.backendSteps || [step.id]).includes(numericStep));
+    if (displayStep) {
+        return displayStep.id;
     }
     return numericStep;
 }
@@ -147,10 +146,10 @@ function normalizeProcessToastMessage(message) {
     if (!text) {
         return '流程已推进。';
     }
-    if (text.startsWith('步骤 4 完成：')) {
-        return '付款阶段已准备就绪。';
+    if (text.startsWith('第一阶段完成：')) {
+        return '已到待付款。';
     }
-    if (text.startsWith('步骤 5 完成：')) {
+    if (text.startsWith('第二阶段完成：')) {
         return '付款成功，设备已启动。';
     }
     return text;
@@ -2418,16 +2417,30 @@ async function advanceProcess() {
         return;
     }
 
-    const data = await apiPost('/api/process/next', { processId: process.processId });
-    await openProcess(process.processId, { pushHistory: false });
-    await loadActiveProcesses();
-    const latestOrderNo = (state.wash.process && (state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo))) || '';
-    if (latestOrderNo) {
-        refreshOrdersOverview(true, { silent: true, preserveItems: true });
-    } else if ((data.process || {}).completed) {
-        refreshOrdersOverview(true, { silent: true, preserveItems: true });
+    try {
+        const data = await apiPost('/api/process/next', { processId: process.processId });
+        await openProcess(process.processId, { pushHistory: false });
+        await loadActiveProcesses();
+        const latestOrderNo = (state.wash.process && (state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo))) || '';
+        if (latestOrderNo) {
+            refreshOrdersOverview(true, { silent: true, preserveItems: true });
+        } else if ((data.process || {}).completed) {
+            refreshOrdersOverview(true, { silent: true, preserveItems: true });
+        }
+        showToastMessage(normalizeProcessToastMessage(data.msg));
+    } catch (error) {
+        try {
+            await openProcess(process.processId, { pushHistory: false });
+            await loadActiveProcesses();
+            const latestOrderNo = (state.wash.process && (state.wash.process.orderNo || ((state.wash.process.contextSummary || {}).orderNo))) || '';
+            if (latestOrderNo) {
+                refreshOrdersOverview(true, { silent: true, preserveItems: true });
+            }
+        } catch (refreshError) {
+            handleRequestError(refreshError, '刷新流程状态失败。', true);
+        }
+        throw error;
     }
-    showToastMessage(normalizeProcessToastMessage(data.msg));
 }
 
 async function resetProcess() {
