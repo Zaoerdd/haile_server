@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from datetime import datetime
 import time
 from typing import Any, Dict
@@ -7,7 +8,7 @@ from typing import Any, Dict
 from flask import Flask, jsonify, render_template, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from config import ALLOW_REMOTE, BASE_PATH, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines, normalize_base_path
+from config import ALLOW_REMOTE, BASE_PATH, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines, normalize_base_path, save_machines
 from services.haier_client import HaierClient
 from services.reservation_service import reservation_service
 from services.scheduler import reservation_scheduler
@@ -85,19 +86,92 @@ def get_location(payload: Dict[str, Any] | None = None) -> tuple[float, float]:
 
 
 def get_scan_machines() -> list[Dict[str, str]]:
-    machine_map = load_machines()
-    return [{'label': label, 'qrCode': qr_code} for label, qr_code in machine_map.items()]
+    return load_machines()
 
 
-def find_scan_mapping(machine_name: str, machine_code: str | None = None) -> Dict[str, str] | None:
-    machine_map = load_machines()
-    if machine_name in machine_map:
-        return {'label': machine_name, 'qrCode': machine_map[machine_name]}
-    if machine_code:
-        for label, qr_code in machine_map.items():
-            if qr_code == machine_code:
-                return {'label': label, 'qrCode': qr_code}
+def normalize_favorite_machine_payload(payload: Dict[str, Any] | None) -> Dict[str, str]:
+    source = payload or {}
+    qr_code = str(source.get('qrCode') or source.get('code') or '').strip()
+    label = str(source.get('label') or source.get('name') or '').strip() or qr_code
+    return {
+        'label': label,
+        'qrCode': qr_code,
+        'goodsId': str(source.get('goodsId') or source.get('id') or '').strip(),
+        'shopId': str(source.get('shopId') or '').strip(),
+        'shopName': str(source.get('shopName') or '').strip(),
+        'categoryCode': str(source.get('categoryCode') or '').strip(),
+        'categoryName': str(source.get('categoryName') or '').strip(),
+        'addedAt': str(source.get('addedAt') or '').strip(),
+    }
+
+
+def build_scan_mapping(favorite: Dict[str, Any] | None) -> Dict[str, str] | None:
+    if not favorite:
+        return None
+    normalized = normalize_favorite_machine_payload(favorite)
+    if not normalized.get('qrCode'):
+        return None
+    return normalized
+
+
+def find_scan_mapping(
+    machine_name: str = '',
+    machine_code: str | None = None,
+    goods_id: str | None = None,
+) -> Dict[str, str] | None:
+    normalized_name = str(machine_name or '').strip()
+    normalized_code = str(machine_code or '').strip()
+    normalized_goods_id = str(goods_id or '').strip()
+
+    for favorite in load_machines():
+        qr_code = str(favorite.get('qrCode') or '').strip()
+        label = str(favorite.get('label') or '').strip()
+        favorite_goods_id = str(favorite.get('goodsId') or '').strip()
+        if normalized_code and qr_code == normalized_code:
+            return build_scan_mapping(favorite)
+        if normalized_goods_id and favorite_goods_id and favorite_goods_id == normalized_goods_id:
+            return build_scan_mapping(favorite)
+        if normalized_name and label and label == normalized_name:
+            return build_scan_mapping(favorite)
     return None
+
+
+def upsert_scan_machine(payload: Dict[str, Any] | None) -> list[Dict[str, str]]:
+    favorite = normalize_favorite_machine_payload(payload)
+    qr_code = favorite.get('qrCode')
+    if not qr_code:
+        raise ValueError('缺少 qrCode')
+
+    favorites = [build_scan_mapping(item) for item in load_machines()]
+    updated: list[Dict[str, str]] = []
+    replaced = False
+    for current in favorites:
+        if not current:
+            continue
+        if current.get('qrCode') == qr_code:
+            favorite['addedAt'] = favorite.get('addedAt') or str(current.get('addedAt') or '').strip()
+            updated.append(favorite)
+            replaced = True
+            continue
+        updated.append(current)
+
+    if not favorite.get('addedAt'):
+        favorite['addedAt'] = datetime.now().astimezone().isoformat(timespec='seconds')
+    if not replaced:
+        updated.append(favorite)
+    return save_machines(updated)
+
+
+def remove_scan_machine(qr_code: str) -> list[Dict[str, str]]:
+    normalized_qr_code = str(qr_code or '').strip()
+    if not normalized_qr_code:
+        raise ValueError('缺少 qrCode')
+    favorites = [
+        favorite
+        for favorite in load_machines()
+        if str(favorite.get('qrCode') or '').strip() != normalized_qr_code
+    ]
+    return save_machines(favorites)
 
 
 def normalize_mode(
@@ -246,6 +320,8 @@ def normalize_machine(item: Dict[str, Any], scan_mapping: Dict[str, str] | None 
         'goodsId': str(item.get('id') or ''),
         'deviceId': str(item.get('deviceId') or ''),
         'name': item.get('name') or '未命名设备',
+        'categoryCode': str(item.get('categoryCode') or ''),
+        'categoryName': str(item.get('categoryName') or ''),
         'floorCode': item.get('floorCode') or '',
         'state': state_code,
         'stateDesc': str(item.get('stateDesc') or status['statusLabel']),
@@ -255,26 +331,112 @@ def normalize_machine(item: Dict[str, Any], scan_mapping: Dict[str, str] | None 
         'statusDetail': status['statusDetail'],
         'enableReserve': bool(item.get('enableReserve')),
         'reserveState': item.get('reserveState'),
+        'isFavorite': bool(scan_mapping),
         'supportsVirtualScan': bool(scan_mapping),
         'scanCode': scan_mapping.get('qrCode') if scan_mapping else None,
     }
 
 
+def iter_nested_dicts(payload: Any):
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            yield from iter_nested_dicts(value)
+        return
+    if isinstance(payload, list):
+        for item in payload:
+            yield from iter_nested_dicts(item)
+
+
+def first_present_value(payload: Dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, ''):
+            return payload.get(key)
+    return None
+
+
+def extract_run_info_snapshot(payload: Any) -> Dict[str, Any] | None:
+    candidate_keys = {
+        'state': ['state', 'runState', 'status', 'deviceState', 'goodsState'],
+        'stateDesc': ['stateDesc', 'runStateDesc', 'statusDesc', 'deviceStateDesc', 'goodsStateDesc'],
+        'finishTime': ['finishTime', 'endTime', 'runEndTime', 'expectFinishTime', 'expectedFinishTime', 'estimateFinishTime'],
+    }
+
+    best_snapshot: Dict[str, Any] | None = None
+    best_score = -1
+    for item in iter_nested_dicts(payload):
+        state = first_present_value(item, candidate_keys['state'])
+        state_desc = first_present_value(item, candidate_keys['stateDesc'])
+        finish_time = first_present_value(item, candidate_keys['finishTime'])
+        score = int(state is not None) + int(state_desc is not None) + int(finish_time is not None)
+        if score <= 0 or score < best_score:
+            continue
+        best_score = score
+        best_snapshot = {
+            'state': state,
+            'stateDesc': state_desc,
+            'finishTime': finish_time,
+        }
+    return best_snapshot
+
+
+def merge_machine_with_run_info(client: HaierClient, machine: Dict[str, Any]) -> Dict[str, Any]:
+    goods_id = str(machine.get('goodsId') or '').strip()
+    category_code = str(machine.get('categoryCode') or '').strip() or HaierClient.WASHER_CATEGORY_CODE
+    if not goods_id:
+        return machine
+
+    run_info_res = client.goods_last_run_info(goods_id, category_code=category_code)
+    if not run_info_res.get('ok'):
+        return machine
+
+    snapshot = extract_run_info_snapshot(run_info_res.get('data'))
+    if not snapshot:
+        return machine
+
+    merged_item = {
+        'state': snapshot.get('state') if snapshot.get('state') is not None else machine.get('state'),
+        'stateDesc': snapshot.get('stateDesc') or machine.get('stateDesc'),
+        'finishTime': snapshot.get('finishTime') or machine.get('finishTime'),
+        'enableReserve': bool(machine.get('enableReserve')),
+    }
+    status = build_machine_status(merged_item)
+    if status.get('statusLabel') != '运行中':
+        return machine
+
+    return {
+        **machine,
+        'state': merged_item.get('state'),
+        'stateDesc': str(merged_item.get('stateDesc') or machine.get('stateDesc') or ''),
+        'finishTime': merged_item.get('finishTime'),
+        'finishTimeText': status.get('finishTimeText', machine.get('finishTimeText') or ''),
+        'statusLabel': status.get('statusLabel', machine.get('statusLabel') or ''),
+        'statusDetail': status.get('statusDetail', machine.get('statusDetail') or ''),
+    }
+
+
 def normalize_machine_detail(detail: Dict[str, Any]) -> Dict[str, Any]:
-    scan_mapping = find_scan_mapping(detail.get('name') or '', detail.get('code'))
+    scan_mapping = find_scan_mapping(
+        machine_name=detail.get('name') or '',
+        machine_code=detail.get('code'),
+        goods_id=str(detail.get('id') or ''),
+    )
+    scan_code = str(detail.get('code') or '').strip() or str((scan_mapping or {}).get('qrCode') or '').strip()
     modes = [normalize_mode(item) for item in detail.get('items') or [] if isinstance(item, dict) and item.get('id') is not None]
     return {
         'goodsId': str(detail.get('id') or ''),
         'name': detail.get('name') or '未命名设备',
         'code': detail.get('code') or '',
         'categoryCode': detail.get('categoryCode') or '',
+        'categoryName': detail.get('categoryName') or '',
         'shopId': str(detail.get('shopId') or ''),
         'shopName': detail.get('shopName') or '',
         'shopAddress': detail.get('shopAddress') or '',
         'deviceState': detail.get('deviceState'),
         'enableReserve': bool(detail.get('enableReserve')),
-        'supportsVirtualScan': bool(scan_mapping),
-        'scanCode': scan_mapping.get('qrCode') if scan_mapping else None,
+        'isFavorite': bool(scan_mapping),
+        'supportsVirtualScan': bool(scan_code),
+        'scanCode': scan_code or None,
         'modes': modes,
     }
 
@@ -383,27 +545,164 @@ def fetch_laundry_rooms(client: HaierClient, lng: float, lat: float) -> Dict[str
     return rooms_res
 
 
-def fetch_all_room_machines(client: HaierClient, position_id: str, category_code: str = '00', floor_code: str = '') -> Dict[str, Any]:
-    page = 1
-    items: list[Dict[str, Any]] = []
-    total = None
-    while total is None or len(items) < total:
-        response = client.device_detail_page(position_id=position_id, category_code=category_code, page=page, page_size=50, floor_code=floor_code)
-        if not response.get('ok'):
-            return response
-        data = response.get('data') or {}
-        total = int(data.get('total') or 0)
-        items.extend(data.get('items') or [])
-        if not data.get('items'):
+def normalize_position_device_category(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'categoryCode': str(item.get('categoryCode') or ''),
+        'categoryName': str(item.get('categoryName') or ''),
+        'total': int(item.get('total') or 0),
+        'idleCount': int(item.get('idleCount') or 0),
+    }
+
+
+def fetch_room_machine_categories(client: HaierClient, position_id: str) -> Dict[str, Any]:
+    response = client.position_device(position_id)
+    if not response.get('ok'):
+        return response
+
+    categories = [
+        normalize_position_device_category(item)
+        for item in (response.get('data') or [])
+        if isinstance(item, dict) and str(item.get('categoryCode') or '').strip()
+    ]
+    return {'ok': True, 'data': categories, 'raw': response.get('raw')}
+
+
+def fetch_all_room_machines(client: HaierClient, position_id: str, category_code: str | None = None, floor_code: str = '') -> Dict[str, Any]:
+    normalized_category_code = str(category_code or '').strip()
+    if normalized_category_code:
+        categories = [{'categoryCode': normalized_category_code, 'categoryName': '', 'total': 0, 'idleCount': 0}]
+    else:
+        category_res = fetch_room_machine_categories(client, position_id)
+        if not category_res.get('ok'):
+            return category_res
+        categories = category_res.get('data') or []
+
+    if not categories:
+        return {'ok': True, 'data': {'items': [], 'total': 0, 'categories': []}}
+
+    all_items: list[Dict[str, Any]] = []
+    for category in categories:
+        resolved_category_code = str(category.get('categoryCode') or '').strip()
+        if not resolved_category_code:
+            continue
+        if not normalized_category_code and int(category.get('total') or 0) <= 0:
+            continue
+
+        page = 1
+        fetched_count = 0
+        total = None
+        while total is None or fetched_count < total:
+            response = client.device_detail_page(
+                position_id=position_id,
+                category_code=resolved_category_code,
+                page=page,
+                page_size=50,
+                floor_code=floor_code,
+            )
+            if not response.get('ok'):
+                return response
+            data = response.get('data') or {}
+            raw_items = data.get('items') or []
+            category_items = [
+                {
+                    **item,
+                    'categoryCode': item.get('categoryCode') or resolved_category_code,
+                    'categoryName': item.get('categoryName') or category.get('categoryName') or '',
+                }
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+            total = int(data.get('total') or 0)
+            all_items.extend(category_items)
+            fetched_count += len(category_items)
+            if not raw_items:
+                break
+            page += 1
+
+    deduped_items: list[Dict[str, Any]] = []
+    seen_goods_ids: set[str] = set()
+    for item in all_items:
+        goods_id = str(item.get('id') or '').strip()
+        dedupe_key = goods_id or json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if dedupe_key in seen_goods_ids:
+            continue
+        seen_goods_ids.add(dedupe_key)
+        deduped_items.append(item)
+
+    return {'ok': True, 'data': {'items': deduped_items, 'total': len(deduped_items), 'categories': categories}}
+
+
+def resolve_favorite_room(client: HaierClient, favorite: Dict[str, Any]) -> Dict[str, Any]:
+    shop_id = str(favorite.get('shopId') or '').strip()
+    fallback_room = normalize_room(
+        {
+            'id': shop_id,
+            'shopId': shop_id,
+            'name': favorite.get('shopName') or '未命名洗衣房',
+            'address': '',
+            'categoryCodeList': [],
+        }
+    )
+    if not shop_id:
+        return fallback_room
+
+    room_res = client.position_detail(shop_id)
+    if not room_res.get('ok'):
+        return fallback_room
+
+    room_data = room_res.get('data') or {}
+    if isinstance(room_data, dict):
+        room = normalize_room(room_data)
+        if room.get('id'):
+            return room
+    return fallback_room
+
+
+def find_targeted_scan_machine_status(client: HaierClient, favorite: Dict[str, Any]) -> Dict[str, Any]:
+    shop_id = str(favorite.get('shopId') or '').strip()
+    if not shop_id:
+        return {'ok': True, 'matched': False, 'room': None, 'machine': None}
+
+    machines_res = fetch_all_room_machines(client, position_id=shop_id)
+    if not machines_res.get('ok'):
+        return machines_res
+
+    goods_id = str(favorite.get('goodsId') or '').strip()
+    label = str(favorite.get('label') or '').strip()
+    candidate = None
+    for machine_item in ((machines_res.get('data') or {}).get('items') or []):
+        if goods_id and str(machine_item.get('id') or '').strip() == goods_id:
+            candidate = machine_item
             break
-        page += 1
-    return {'ok': True, 'data': {'items': items, 'total': total or len(items)}}
+    if not candidate and label:
+        for machine_item in ((machines_res.get('data') or {}).get('items') or []):
+            if str(machine_item.get('name') or '').strip() == label:
+                candidate = machine_item
+                break
+
+    if not candidate:
+        return {'ok': True, 'matched': False, 'room': None, 'machine': None}
+
+    room = resolve_favorite_room(client, favorite)
+    machine = merge_machine_with_run_info(client, normalize_machine(candidate, build_scan_mapping(favorite)))
+    return {
+        'ok': True,
+        'matched': True,
+        'room': room,
+        'machine': machine,
+    }
 
 
 def find_scan_machine_status(client: HaierClient, qr_code: str, *, lng: float, lat: float) -> Dict[str, Any]:
     normalized_qr_code = str(qr_code or '').strip()
     if not normalized_qr_code:
-        return {'ok': False, 'msg': '缺少扫码机组编号', 'error_type': 'missing_qr_code'}
+        return {'ok': False, 'msg': '缺少收藏设备编号', 'error_type': 'missing_qr_code'}
+
+    favorite = find_scan_mapping(machine_code=normalized_qr_code)
+    if favorite:
+        targeted_result = find_targeted_scan_machine_status(client, favorite)
+        if targeted_result.get('ok') and targeted_result.get('matched'):
+            return targeted_result
 
     rooms_res = fetch_laundry_rooms(client, lng, lat)
     if not rooms_res.get('ok'):
@@ -421,9 +720,14 @@ def find_scan_machine_status(client: HaierClient, qr_code: str, *, lng: float, l
             return machines_res
 
         for machine_item in ((machines_res.get('data') or {}).get('items') or []):
-            machine = normalize_machine(machine_item, find_scan_mapping(machine_item.get('name') or ''))
-            if str(machine.get('scanCode') or '').strip() != normalized_qr_code:
+            scan_mapping = find_scan_mapping(
+                machine_name=machine_item.get('name') or '',
+                goods_id=str(machine_item.get('id') or ''),
+            )
+            if str((scan_mapping or {}).get('qrCode') or '').strip() != normalized_qr_code:
                 continue
+            machine = normalize_machine(machine_item, scan_mapping)
+            machine = merge_machine_with_run_info(client, machine)
             return {
                 'ok': True,
                 'matched': True,
@@ -454,6 +758,7 @@ def index():
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
+    favorites = get_scan_machines()
     return jsonify(
         {
             'status': 'success',
@@ -464,7 +769,8 @@ def get_config():
             },
             'tokenStatus': get_token_status(),
             'scheduler': reservation_scheduler.snapshot(),
-            'scanMachines': get_scan_machines(),
+            'favorites': favorites,
+            'scanMachines': favorites,
         }
     )
 
@@ -514,16 +820,17 @@ def laundry_sections():
         return json_error(rooms_res.get('msg') or '获取洗衣房列表失败。', error_type=rooms_res.get('error_type', 'room_list_failed'), debug=rooms_res.get('raw'))
 
     rooms = [normalize_room(item) for item in ((rooms_res.get('data') or {}).get('items') or [])]
-    scan_machines = get_scan_machines()
+    favorites = get_scan_machines()
     return jsonify(
         {
             'status': 'success',
             'sections': [
                 {'key': 'rooms', 'label': '洗衣房', 'count': len(rooms)},
-                {'key': 'scan-machines', 'label': '扫码机组', 'count': len(scan_machines)},
+                {'key': 'favorites', 'label': '收藏', 'count': len(favorites)},
             ],
             'rooms': rooms,
-            'scanMachines': scan_machines,
+            'favorites': favorites,
+            'scanMachines': favorites,
             'debug': {'location': {'lng': lng, 'lat': lat}},
         }
     )
@@ -551,7 +858,7 @@ def room_machines(position_id: str):
     if not token:
         return jsonify(build_token_missing_payload()), 400
 
-    category_code = request.args.get('categoryCode', '00')
+    category_code = str(request.args.get('categoryCode', '') or '').strip() or None
     floor_code = request.args.get('floorCode', '')
     client = HaierClient(token)
 
@@ -568,7 +875,13 @@ def room_machines(position_id: str):
 
     room = normalize_room(room_res.get('data') or {})
     machines = [
-        normalize_machine(item, find_scan_mapping(item.get('name') or ''))
+        normalize_machine(
+            item,
+            find_scan_mapping(
+                machine_name=item.get('name') or '',
+                goods_id=str(item.get('id') or ''),
+            ),
+        )
         for item in ((machines_res.get('data') or {}).get('items') or [])
     ]
     return jsonify(
@@ -576,6 +889,7 @@ def room_machines(position_id: str):
             'status': 'success',
             'room': room,
             'floors': floors_res.get('data') or [],
+            'categories': (machines_res.get('data') or {}).get('categories') or [],
             'machines': machines,
         }
     )
@@ -592,7 +906,7 @@ def scan_machine_status(qr_code: str):
     status_res = find_scan_machine_status(client, qr_code, lng=lng, lat=lat)
     if not status_res.get('ok'):
         return json_error(
-            status_res.get('msg') or '获取扫码机组状态失败。',
+            status_res.get('msg') or '获取收藏设备状态失败。',
             error_type=status_res.get('error_type', 'scan_machine_status_failed'),
             debug=status_res.get('raw'),
         )
@@ -603,6 +917,39 @@ def scan_machine_status(qr_code: str):
             'matched': bool(status_res.get('matched')),
             'room': status_res.get('room'),
             'machine': status_res.get('machine'),
+        }
+    )
+
+
+@app.route('/api/laundry/favorites', methods=['POST'])
+def add_favorite_machine():
+    data = request.get_json(force=True) or {}
+    try:
+        favorites = upsert_scan_machine(data)
+    except ValueError as exc:
+        return json_error(str(exc), error_type='invalid_favorite')
+    return jsonify(
+        {
+            'status': 'success',
+            'msg': '已加入收藏。',
+            'favorites': favorites,
+            'scanMachines': favorites,
+        }
+    )
+
+
+@app.route('/api/laundry/favorites/<qr_code>', methods=['DELETE'])
+def delete_favorite_machine(qr_code: str):
+    try:
+        favorites = remove_scan_machine(qr_code)
+    except ValueError as exc:
+        return json_error(str(exc), error_type='invalid_favorite')
+    return jsonify(
+        {
+            'status': 'success',
+            'msg': '已取消收藏。',
+            'favorites': favorites,
+            'scanMachines': favorites,
         }
     )
 

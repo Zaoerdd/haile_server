@@ -49,6 +49,7 @@ const state = {
         scanMachines: [],
         view: 'home',
         roomId: null,
+        roomCategoryCode: '',
         roomData: null,
         machineId: null,
         machineDetail: null,
@@ -473,17 +474,14 @@ function restoreSelectValue(id, value) {
 
 async function refreshWashCurrentView(reason = 'manual') {
     const currentView = state.wash.view || 'home';
-    if (currentView === 'room' && state.wash.roomId) {
-        state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
-        renderWash();
-        return;
-    }
-    if (currentView === 'machine' && state.wash.machineId) {
+    if ((currentView === 'room' || currentView === 'machine') && state.wash.roomId) {
         const selectedMode = getSelectedValue('washModeSelect');
-        const machineDetail = await getMachineDetail(state.wash.machineId, { forceRefresh: true });
-        state.wash.machineDetail = machineDetail;
-        if (state.wash.roomId) {
-            state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
+        state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
+        if (state.wash.machineId) {
+            state.wash.machineDetail = await getMachineDetail(state.wash.machineId, { forceRefresh: true });
+        }
+        if (currentView === 'machine') {
+            state.wash.view = 'room';
         }
         renderWash();
         restoreSelectValue('washModeSelect', selectedMode);
@@ -613,6 +611,9 @@ function buildHistoryState() {
     if (state.wash.roomId) {
         payload.roomId = state.wash.roomId;
     }
+    if (state.wash.roomCategoryCode) {
+        payload.roomCategoryCode = state.wash.roomCategoryCode;
+    }
     if (state.wash.machineId) {
         payload.machineId = state.wash.machineId;
     }
@@ -674,11 +675,22 @@ async function restoreHistoryState(navState) {
             return;
         }
         if (washView === 'room' && navState.roomId) {
-            await openRoom(navState.roomId, { pushHistory: false });
+            await openRoom(navState.roomId, { pushHistory: false, roomCategoryCode: navState.roomCategoryCode || '' });
+            if (navState.machineId) {
+                await openMachine(navState.machineId, {
+                    pushHistory: false,
+                    roomId: navState.roomId || null,
+                    roomCategoryCode: navState.roomCategoryCode || '',
+                });
+            }
             return;
         }
         if (washView === 'machine' && navState.machineId) {
-            await openMachine(navState.machineId, { pushHistory: false, roomId: navState.roomId || null });
+            await openMachine(navState.machineId, {
+                pushHistory: false,
+                roomId: navState.roomId || null,
+                roomCategoryCode: navState.roomCategoryCode || '',
+            });
             return;
         }
         if (washView === 'scan' && navState.qrCode) {
@@ -921,13 +933,31 @@ function showConfirmDialog(message, title = '请确认') {
     return openAppDialog({ title, message, confirmText: '确定', cancelText: '取消', showCancel: true });
 }
 
+function getFavoriteMachinesFromPayload(data) {
+    const favorites = data && Array.isArray(data.favorites) ? data.favorites : null;
+    if (favorites) {
+        return favorites;
+    }
+    return data && Array.isArray(data.scanMachines) ? data.scanMachines : [];
+}
+
+async function syncFavoriteMachines(scanMachines, options = {}) {
+    const { hydrateStatus = false, forceRefresh = false } = options;
+    const machines = Array.isArray(scanMachines) ? scanMachines : [];
+    state.wash.scanMachines = hydrateStatus
+        ? await hydrateScanMachineStatuses(machines, { forceRefresh })
+        : machines;
+    populateReservationScanOptions();
+    return state.wash.scanMachines;
+}
+
 async function loadConfig() {
     let loaded = false;
     try {
         const data = await apiGet('/api/config');
         state.security = data.security || null;
         state.scheduler = data.scheduler || null;
-        state.wash.scanMachines = data.scanMachines || [];
+        await syncFavoriteMachines(getFavoriteMachinesFromPayload(data));
         applyTokenStatus(data.tokenStatus || DEFAULT_TOKEN_STATUS, !((data.tokenStatus || {}).valid));
         loaded = true;
     } finally {
@@ -978,12 +1008,12 @@ async function loadLaundrySections({ showToast = false, preserveView = false } =
     if (!preserveView) {
         state.wash.view = 'home';
     }
-    renderWashLoading('正在加载洗衣房和扫码机组...');
+    renderWashLoading('正在加载洗衣房和收藏...');
 
     try {
         const data = await apiGet('/api/laundry/sections');
         state.wash.rooms = data.rooms || [];
-        state.wash.scanMachines = data.scanMachines || state.wash.scanMachines;
+        await syncFavoriteMachines(getFavoriteMachinesFromPayload(data), { hydrateStatus: true, forceRefresh: true });
         state.wash.loading = false;
         if (!preserveView) {
             clearWashTransientState();
@@ -1269,6 +1299,49 @@ async function getScanMachineStatus(qrCode, options = {}) {
     return result;
 }
 
+async function addFavoriteMachine(machine) {
+    const data = await apiPost('/api/laundry/favorites', {
+        label: machine.name || machine.label || '收藏设备',
+        qrCode: machine.scanCode || machine.qrCode || machine.code || '',
+        goodsId: machine.goodsId || '',
+        shopId: machine.shopId || '',
+        shopName: machine.shopName || '',
+        categoryCode: machine.categoryCode || '',
+        categoryName: machine.categoryName || '',
+    });
+    return getFavoriteMachinesFromPayload(data);
+}
+
+async function removeFavoriteMachine(qrCode) {
+    const data = await apiDelete(`/api/laundry/favorites/${encodeURIComponent(qrCode)}`);
+    return getFavoriteMachinesFromPayload(data);
+}
+
+async function hydrateScanMachineStatuses(scanMachines, options = {}) {
+    const machines = Array.isArray(scanMachines) ? scanMachines : [];
+    if (!machines.length) {
+        return [];
+    }
+
+    const { forceRefresh = false } = options;
+    const previousStatusByQrCode = new Map(
+        (state.wash.scanMachines || []).map(machine => [machine.qrCode, machine.linkedStatus || null])
+    );
+    const results = await Promise.allSettled(
+        machines.map(machine => getScanMachineStatus(machine.qrCode, { forceRefresh }))
+    );
+
+    return machines.map((machine, index) => {
+        const result = results[index];
+        return {
+            ...machine,
+            linkedStatus: result.status === 'fulfilled'
+                ? result.value
+                : (previousStatusByQrCode.get(machine.qrCode) || null),
+        };
+    });
+}
+
 async function getOrderDetail(orderNo, forceRefresh = false) {
     if (!forceRefresh && cache.orderDetails.has(orderNo)) {
         return cache.orderDetails.get(orderNo);
@@ -1306,7 +1379,7 @@ function populateReservationScanOptions() {
             value: machine.qrCode,
             label: machine.label,
         })),
-        '请选择扫码机组'
+        '请选择收藏机器'
     );
 }
 
@@ -1330,7 +1403,7 @@ async function refreshReservationMachineOptions() {
     }
 
     if (el.reservationSource.value === 'scan') {
-        fillSelect(el.reservationMachine, [], '扫码机组无需额外选择设备');
+        fillSelect(el.reservationMachine, [], '收藏机器无需额外选择设备');
         await refreshReservationModes();
         return;
     }
@@ -1343,7 +1416,7 @@ async function refreshReservationMachineOptions() {
 
     try {
         const payload = await getRoomMachines(roomId);
-        const machines = (payload.machines || []).filter(machine => machine.supportsVirtualScan && machine.scanCode);
+        const machines = payload.machines || [];
         state.reservations.roomMachines = machines;
         fillSelect(
             el.reservationMachine,
@@ -1351,7 +1424,7 @@ async function refreshReservationMachineOptions() {
                 value: machine.goodsId,
                 label: `${machine.name} · ${machine.statusDetail || machine.stateDesc}`,
             })),
-            machines.length ? '请选择洗衣机' : '当前洗衣房暂无可预约机器'
+            machines.length ? '请选择洗衣机' : '当前洗衣房暂无机器'
         );
         await refreshReservationModes();
     } catch (error) {
@@ -1382,8 +1455,12 @@ async function refreshReservationModes() {
             return;
         }
         const detail = await getMachineDetail(goodsId);
-        const modes = (detail.modes || []).filter(() => detail.supportsVirtualScan);
-        populateReservationModeOptions(modes);
+        if (!detail.supportsVirtualScan || !detail.scanCode) {
+            state.reservations.modeOptions = [];
+            fillSelect(el.reservationMode, [], '当前设备暂不支持扫码下单');
+            return;
+        }
+        populateReservationModeOptions(detail.modes || []);
     } catch (error) {
         syncTokenFailure(error);
         handleRequestError(error, '读取预约模式失败。', true);
@@ -1418,6 +1495,7 @@ function toggleReservationScheduleFields() {
 
 function clearWashTransientState() {
     state.wash.roomId = null;
+    state.wash.roomCategoryCode = '';
     state.wash.roomData = null;
     state.wash.machineId = null;
     state.wash.machineDetail = null;
@@ -1511,7 +1589,7 @@ function renderWashLoading(message) {
 
 function renderWash() {
     if (state.bootstrap.configLoading || state.wash.loading) {
-        renderWashLoading('正在加载洗衣房和扫码机组...');
+        renderWashLoading('正在加载洗衣房和收藏...');
         return;
     }
 
@@ -1523,12 +1601,8 @@ function renderWash() {
         return;
     }
 
-    if (state.wash.view === 'room') {
+    if (state.wash.view === 'room' || state.wash.view === 'machine') {
         el.washView.innerHTML = renderWashRoomView();
-        return;
-    }
-    if (state.wash.view === 'machine') {
-        el.washView.innerHTML = renderWashMachineView();
         return;
     }
     if (state.wash.view === 'scan') {
@@ -1564,7 +1638,7 @@ function renderWashHomeView() {
         <section class="panel-card">
             <div class="compact-summary">
                 <div class="compact-main">
-                    <h3>扫码机组</h3>
+                    <h3>收藏</h3>
                 </div>
                 <div class="compact-summary-side">
                     <span class="chip warning">${scanMachines.length} 台</span>
@@ -1572,7 +1646,7 @@ function renderWashHomeView() {
             </div>
             <div class="spacer-sm"></div>
             <div class="scan-list">
-                ${scanMachines.length ? scanMachines.map(renderScanMachineCard).join('') : renderEmptyState('暂无扫码机组', '请检查 machines.json 是否已配置。')}
+                ${scanMachines.length ? scanMachines.map(renderScanMachineCard).join('') : renderEmptyState('暂无收藏机器', '请先在机器详情页点击星号收藏。')}
             </div>
         </section>
     `;
@@ -1582,6 +1656,11 @@ function renderWashRoomView() {
     const payload = state.wash.roomData || {};
     const room = payload.room || {};
     const machines = payload.machines || [];
+    const categories = getRoomCategoryOptions(payload, machines);
+    const selectedCategoryCode = resolveSelectedRoomCategoryCode(categories);
+    const filteredMachines = selectedCategoryCode
+        ? machines.filter(machine => String(machine.categoryCode || '') === selectedCategoryCode)
+        : machines;
     const subtitle = uniqueSubtitle(room.name || '洗衣房', room.address || '');
     return `
         <section class="panel-card">
@@ -1606,19 +1685,24 @@ function renderWashRoomView() {
                     <h3>设备列表</h3>
                     <p>运行中的设备直接显示预计完成时间。</p>
                 </div>
+                <div class="compact-summary-side">
+                    <span class="chip pending">${filteredMachines.length} 台</span>
+                </div>
             </div>
+            ${renderRoomCategoryMenu(categories, selectedCategoryCode)}
             <div class="spacer-sm"></div>
             <div class="machine-list">
-                ${machines.length ? machines.map(renderRoomMachineCard).join('') : renderEmptyState('暂无设备', '这个洗衣房当前没有可显示的设备。')}
+                ${filteredMachines.length ? filteredMachines.map(renderRoomMachineCard).join('') : renderEmptyState('暂无设备', '当前分类下没有可显示的设备。')}
             </div>
         </section>
+        ${renderWashMachineView()}
     `;
 }
 
 function renderWashMachineView() {
     const machine = state.wash.machineDetail;
     if (!machine) {
-        return renderEmptyState('设备未找到', '请返回上一页重新选择设备。');
+        return '';
     }
 
     const locationText = machine.shopName || machine.shopAddress || '暂无洗衣房信息';
@@ -1628,44 +1712,58 @@ function renderWashMachineView() {
         label: `${mode.label} · ${mode.price} 元`,
     }));
     return `
-        <section class="panel-card">
-            <div class="action-row">
-                <button class="btn btn-light" type="button" data-action="back-room">返回设备列表</button>
-                <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
-            </div>
-            <div class="spacer-sm"></div>
-            <div class="compact-summary">
-                <div class="compact-main">
-                    <h3>${escapeHtml(machine.name || '设备')}</h3>
-                    ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+        <div class="wash-machine-modal" aria-hidden="false">
+            <button class="wash-machine-modal-backdrop" type="button" data-action="close-machine-modal" aria-label="关闭设备详情"></button>
+            <section class="wash-machine-modal-panel panel-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(machine.name || '设备详情')}">
+                <div class="wash-machine-modal-toolbar">
+                    <button class="btn btn-light" type="button" data-action="close-machine-modal">关闭</button>
+                    <button class="btn btn-light" type="button" data-action="back-home">返回洗衣首页</button>
                 </div>
-                <div class="compact-summary-side">
-                    <span class="chip pending">${modeOptions.length} 个模式</span>
-                    ${machine.categoryCode ? `<span class="compact-side-value">${escapeHtml(machine.categoryCode)}</span>` : ''}
+                <div class="spacer-sm"></div>
+                <div class="compact-summary">
+                    <div class="compact-main">
+                        <div class="machine-detail-title-row">
+                            <h3>${escapeHtml(machine.name || '设备')}</h3>
+                            <button
+                                class="favorite-toggle${machine.isFavorite ? ' active' : ''}"
+                                type="button"
+                                data-action="toggle-favorite"
+                                aria-pressed="${machine.isFavorite ? 'true' : 'false'}"
+                            >
+                                <span class="favorite-toggle-icon">${machine.isFavorite ? '★' : '☆'}</span>
+                                <span>${machine.isFavorite ? '已收藏' : '收藏'}</span>
+                            </button>
+                        </div>
+                        ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+                    </div>
+                    <div class="compact-summary-side">
+                        <span class="chip pending">${modeOptions.length} 个模式</span>
+                        ${machine.categoryCode ? `<span class="compact-side-value">${escapeHtml(machine.categoryCode)}</span>` : ''}
+                    </div>
                 </div>
-            </div>
-            <div class="detail-grid">
-                <div><span>设备编号</span><span>${escapeHtml(machine.goodsId || '--')}</span></div>
-                <div><span>设备类型</span><span>${escapeHtml(machine.categoryCode || '--')}</span></div>
-            </div>
-            <label class="mode-select">
-                选择模式
-                ${renderSelect('washModeSelect', modeOptions, '请选择模式')}
-            </label>
-            <div class="spacer-sm"></div>
-            <div class="action-row">
-                <button class="btn btn-secondary" type="button" data-action="create-lock-order">线上下单（到创建订单）</button>
-                ${machine.supportsVirtualScan && machine.scanCode ? '<button class="btn btn-primary" type="button" data-action="open-machine-scan">虚拟扫码手动流程</button>' : ''}
-            </div>
-        </section>
-        ${renderWashResult()}
+                <div class="detail-grid">
+                    <div><span>设备编号</span><span>${escapeHtml(machine.goodsId || '--')}</span></div>
+                    <div><span>设备类型</span><span>${escapeHtml(machine.categoryCode || '--')}</span></div>
+                </div>
+                <label class="mode-select">
+                    选择模式
+                    ${renderSelect('washModeSelect', modeOptions, '请选择模式')}
+                </label>
+                <div class="spacer-sm"></div>
+                <div class="action-row">
+                    <button class="btn btn-secondary" type="button" data-action="create-lock-order">线上下单（到创建订单）</button>
+                    ${machine.supportsVirtualScan && machine.scanCode ? '<button class="btn btn-primary" type="button" data-action="open-machine-scan">扫码下单（手动流程）</button>' : ''}
+                </div>
+                ${renderWashResult()}
+            </section>
+        </div>
     `;
 }
 
 function renderWashScanView() {
     const machine = state.wash.scanMachine;
     if (!machine) {
-        return renderEmptyState('扫码机组未找到', '请返回洗衣首页重新选择扫码机组。');
+        return renderEmptyState('扫码设备未找到', '请返回洗衣首页重新选择收藏设备。');
     }
 
     const modeOptions = (machine.modes || []).map(mode => ({
@@ -1680,7 +1778,7 @@ function renderWashScanView() {
             <div class="spacer-sm"></div>
             <div class="compact-summary">
                 <div class="compact-main">
-                    <h3>${escapeHtml(machine.label || '扫码机组')}</h3>
+                    <h3>${escapeHtml(machine.label || '收藏设备')}</h3>
                     <p>二维码编号：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
                 </div>
                 <div class="compact-summary-side">
@@ -1688,8 +1786,6 @@ function renderWashScanView() {
                     <span class="compact-side-value">${modeOptions.length} 个模式</span>
                 </div>
             </div>
-            <div class="spacer-sm"></div>
-            ${renderScanMachineStatusSummary(machine.linkedStatus)}
             <label class="mode-select">
                 选择模式
                 ${renderSelect('scanModeSelect', modeOptions, '请选择模式')}
@@ -1706,7 +1802,7 @@ function renderWashScanView() {
 function renderWashProcessView() {
     const process = state.wash.process;
     if (!process) {
-        return renderEmptyState('流程不存在', '请从扫码机组重新开始，或到订单页继续已有流程。');
+        return renderEmptyState('流程不存在', '请从收藏设备重新开始，或到订单页继续已有流程。');
     }
 
     const currentStep = Number(process.currentStep || 1);
@@ -1988,6 +2084,15 @@ function renderRoomCard(room) {
 }
 
 function renderScanMachineCard(machine) {
+    const linkedStatus = machine.linkedStatus || null;
+    const linkedMachine = linkedStatus && linkedStatus.matched ? linkedStatus.machine || null : null;
+    const statusChipClass = linkedMachine ? machineChipClass(linkedMachine) : 'pending';
+    const statusChipText = linkedMachine
+        ? (linkedMachine.statusLabel || linkedMachine.stateDesc || '未知')
+        : (linkedStatus ? '未匹配' : '读取中');
+    const timeChipText = linkedMachine
+        ? machineAvailabilityText(linkedMachine)
+        : (linkedStatus ? '暂无时间' : '计算中');
     return `
         <article
             class="list-card row-card clickable-card"
@@ -1996,13 +2101,14 @@ function renderScanMachineCard(machine) {
             data-clickable-card="true"
             data-action="open-scan"
             data-qr-code="${escapeHtml(machine.qrCode)}"
-            aria-label="进入${escapeHtml(machine.label || '扫码机组')}流程"
+            aria-label="进入${escapeHtml(machine.label || '收藏设备')}流程"
         >
             <div class="row-card-main">
                 <div class="row-card-head">
-                    <h4>${escapeHtml(machine.label || '扫码机组')}</h4>
+                    <h4>${escapeHtml(machine.label || '收藏设备')}</h4>
                     <div class="row-card-pills">
-                        <span class="chip warning">手动流程</span>
+                        <span class="chip ${statusChipClass}">${escapeHtml(statusChipText)}</span>
+                        <span class="chip info">${escapeHtml(timeChipText)}</span>
                     </div>
                 </div>
                 <p class="row-card-subtitle">二维码：${escapeHtml(maskCode(machine.qrCode || ''))}</p>
@@ -2037,6 +2143,91 @@ function renderRoomMachineCard(machine) {
             </div>
             ${renderCardIcon()}
         </article>
+    `;
+}
+
+function getRoomCategoryOptions(payload, machines) {
+    const categoryMap = new Map();
+    const hasServerCategories = Array.isArray(payload.categories) && payload.categories.length > 0;
+    (payload.categories || []).forEach(category => {
+        const code = String((category || {}).categoryCode || '').trim();
+        if (!code) {
+            return;
+        }
+        categoryMap.set(code, {
+            categoryCode: code,
+            categoryName: String(category.categoryName || code),
+            total: Number(category.total || 0),
+            idleCount: Number(category.idleCount || 0),
+        });
+    });
+    (machines || []).forEach(machine => {
+        const code = String((machine || {}).categoryCode || '').trim();
+        if (!code) {
+            return;
+        }
+        if (!categoryMap.has(code)) {
+            categoryMap.set(code, {
+                categoryCode: code,
+                categoryName: String(machine.categoryName || code),
+                total: 0,
+                idleCount: 0,
+            });
+        }
+        if (!hasServerCategories) {
+            const item = categoryMap.get(code);
+            item.total += 1;
+            if (String(machine.statusLabel || '').includes('空闲')) {
+                item.idleCount += 1;
+            }
+        }
+    });
+
+    return [
+        {
+            categoryCode: '',
+            categoryName: '全部',
+            total: (machines || []).length,
+            idleCount: Number((((payload || {}).room) || {}).idleCount || 0),
+        },
+        ...Array.from(categoryMap.values()),
+    ];
+}
+
+function resolveSelectedRoomCategoryCode(categories) {
+    const availableCodes = new Set((categories || []).map(item => String(item.categoryCode || '')));
+    if (availableCodes.has(state.wash.roomCategoryCode || '')) {
+        return state.wash.roomCategoryCode || '';
+    }
+    state.wash.roomCategoryCode = '';
+    return '';
+}
+
+function renderRoomCategoryMenu(categories, selectedCategoryCode) {
+    if (!categories || categories.length <= 1) {
+        return '';
+    }
+    return `
+        <div class="category-menu" role="tablist" aria-label="设备分类">
+            ${categories.map(category => {
+                const code = String(category.categoryCode || '');
+                const active = code === selectedCategoryCode;
+                const countText = Number.isFinite(Number(category.total)) ? `${category.total} 台` : '--';
+                return `
+                    <button
+                        class="category-menu-btn${active ? ' active' : ''}"
+                        type="button"
+                        role="tab"
+                        aria-selected="${active ? 'true' : 'false'}"
+                        data-action="set-room-category"
+                        data-category-code="${escapeHtml(code)}"
+                    >
+                        <span>${escapeHtml(category.categoryName || code || '全部')}</span>
+                        <strong>${escapeHtml(countText)}</strong>
+                    </button>
+                `;
+            }).join('')}
+        </div>
     `;
 }
 
@@ -2271,13 +2462,11 @@ async function handleWashClick(event) {
         pushHistoryState();
         return;
     }
-    if (action === 'back-room') {
+    if (action === 'back-room' || action === 'close-machine-modal') {
         if (state.wash.roomId && state.wash.roomData) {
             state.wash.view = 'room';
             state.wash.machineId = null;
             state.wash.machineDetail = null;
-            state.wash.scanMachine = null;
-            state.wash.process = null;
             state.wash.result = null;
         } else {
             clearWashTransientState();
@@ -2287,6 +2476,12 @@ async function handleWashClick(event) {
         renderGlobalRefresh();
         scheduleActiveAutoRefresh();
         pushHistoryState();
+        return;
+    }
+    if (action === 'set-room-category') {
+        state.wash.roomCategoryCode = String(button.dataset.categoryCode || '');
+        renderWash();
+        replaceHistoryState();
         return;
     }
 
@@ -2305,6 +2500,10 @@ async function handleWashClick(event) {
         }
         if (action === 'open-scan') {
             await openScanMachine(button.dataset.qrCode);
+            return;
+        }
+        if (action === 'toggle-favorite') {
+            await toggleFavoriteForCurrentMachine();
             return;
         }
         if (action === 'open-machine-scan') {
@@ -2338,6 +2537,7 @@ async function openRoom(roomId, options = {}) {
         const payload = await getRoomMachines(roomId);
         state.wash.view = 'room';
         state.wash.roomId = roomId;
+        state.wash.roomCategoryCode = String(options.roomCategoryCode || '');
         state.wash.roomData = payload;
         state.wash.machineId = null;
         state.wash.machineDetail = null;
@@ -2362,12 +2562,16 @@ async function openMachine(goodsId, options = {}) {
     state.wash.loading = true;
     renderWashLoading('正在加载设备详情...');
     try {
-        if (options.roomId && (!state.wash.roomData || state.wash.roomId !== options.roomId)) {
-            state.wash.roomData = await getRoomMachines(options.roomId);
-            state.wash.roomId = options.roomId;
+        const targetRoomId = options.roomId || state.wash.roomId || '';
+        if (targetRoomId && (!state.wash.roomData || state.wash.roomId !== targetRoomId)) {
+            state.wash.roomData = await getRoomMachines(targetRoomId);
+            state.wash.roomId = targetRoomId;
+        }
+        if (options.roomCategoryCode != null) {
+            state.wash.roomCategoryCode = String(options.roomCategoryCode || '');
         }
         state.wash.machineDetail = await getMachineDetail(goodsId);
-        state.wash.view = 'machine';
+        state.wash.view = 'room';
         state.wash.machineId = goodsId;
         state.wash.scanMachine = null;
         state.wash.process = null;
@@ -2396,7 +2600,7 @@ async function openScanMachine(qrCode, options = {}) {
             getScanMachineStatus(qrCode),
         ]);
         state.wash.scanMachine = {
-            ...(localMachine || { label: options.label || '虚拟扫码设备', qrCode }),
+            ...(localMachine || { label: options.label || '收藏设备', qrCode }),
             modes,
             linkedStatus,
         };
@@ -2418,10 +2622,35 @@ async function openScanMachine(qrCode, options = {}) {
     }
 }
 
+async function toggleFavoriteForCurrentMachine() {
+    const machine = state.wash.machineDetail;
+    if (!machine) {
+        return;
+    }
+    if (!machine.scanCode) {
+        await showAlertDialog('当前设备暂未返回二维码，无法加入收藏。');
+        return;
+    }
+
+    const favorites = machine.isFavorite
+        ? await removeFavoriteMachine(machine.scanCode)
+        : await addFavoriteMachine(machine);
+    await syncFavoriteMachines(favorites, { hydrateStatus: true, forceRefresh: true });
+
+    state.wash.machineDetail = {
+        ...machine,
+        isFavorite: !machine.isFavorite,
+    };
+    cache.machineDetails.set(machine.goodsId, state.wash.machineDetail);
+    renderWash();
+    await refreshReservationMachineOptions();
+    showToastMessage(machine.isFavorite ? '已取消收藏。' : '已加入收藏。');
+}
+
 async function openMachineScan() {
     const machine = state.wash.machineDetail;
     if (!machine || !machine.supportsVirtualScan || !machine.scanCode) {
-        await showAlertDialog('当前设备不支持虚拟扫码流程。');
+        await showAlertDialog('当前设备暂不支持扫码下单。');
         return;
     }
     await openScanMachine(machine.scanCode, { label: machine.name });
@@ -2595,7 +2824,7 @@ async function handleReservationSubmit(event) {
         const qrCode = el.reservationScanMachine.value;
         const machine = (state.wash.scanMachines || []).find(item => item.qrCode === qrCode);
         if (!qrCode || !machine) {
-            await showAlertDialog('请先选择扫码机组。');
+            await showAlertDialog('请先选择收藏机器。');
             return;
         }
         payload.machineId = qrCode;
@@ -2610,11 +2839,16 @@ async function handleReservationSubmit(event) {
             await showAlertDialog('请先选择洗衣房和洗衣机。');
             return;
         }
+        const detail = await getMachineDetail(machine.goodsId);
+        if (!detail.supportsVirtualScan || !detail.scanCode) {
+            await showAlertDialog('当前设备暂不支持扫码下单。');
+            return;
+        }
         payload.machineId = machine.goodsId;
-        payload.machineName = machine.name;
+        payload.machineName = detail.name || machine.name;
         payload.roomId = room.id;
         payload.roomName = room.name;
-        payload.qrCode = machine.scanCode;
+        payload.qrCode = detail.scanCode;
     }
 
     const data = await apiPost('/api/reservations', payload);
@@ -3028,41 +3262,6 @@ function machineAvailabilityDetail(machine) {
         return '';
     }
     return detailText;
-}
-
-function renderScanMachineStatusSummary(linkedStatus) {
-    if (!linkedStatus) {
-        return '<div class="callout scan-machine-status scan-machine-status-empty">正在读取对应设备状态...</div>';
-    }
-    if (!linkedStatus.matched || !linkedStatus.machine) {
-        return '<div class="callout scan-machine-status scan-machine-status-empty">暂无对应设备状态</div>';
-    }
-
-    const machine = linkedStatus.machine || {};
-    const room = linkedStatus.room || {};
-    const subtitle = uniqueSubtitle(machine.name || '对应设备', room.name || room.address || '');
-    const metaItems = [
-        room.address ? renderMetaPill('位置', room.address) : '',
-        machine.floorCode ? renderMetaPill('楼层', machine.floorCode) : '',
-        machineAvailabilityDetail(machine) ? renderMetaPill('状态', machineAvailabilityDetail(machine)) : '',
-        machine.goodsId ? renderMetaPill('设备编号', machine.goodsId) : '',
-    ].filter(Boolean).join('');
-
-    return `
-        <div class="scan-machine-status">
-            <div class="compact-card-head">
-                <div class="compact-main">
-                    <h4>对应洗衣房设备</h4>
-                    ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
-                </div>
-                <div class="compact-side">
-                    <span class="chip ${machineChipClass(machine)}">${escapeHtml(machine.statusLabel || machine.stateDesc || '未知')}</span>
-                    <span class="compact-side-value">${escapeHtml(machineAvailabilityText(machine))}</span>
-                </div>
-            </div>
-            ${metaItems ? `<div class="compact-meta-row">${metaItems}</div>` : ''}
-        </div>
-    `;
 }
 
 function machineChipClass(machine) {

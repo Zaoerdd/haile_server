@@ -1,11 +1,85 @@
 {
-  "11栋07楼01号机": "GT1904205991A",
-  "男生洗衣机5号": "GT1904205207A",
-  "男生洗衣机17号": "GT1904205466A",
-  "男生洗衣机16号": "GT1904205475A",
-  "男生烘干机43号": "GT1808110210B1",
-  "男生烘干机39号": "GT1808110822B1",
-  "男生烘干机31号": "GT1808110212B1",
-  "男生洗衣机7号": "GT1904205204A"
-  
+  "version": 2,
+  "favorites": [
+    {
+      "label": "男生洗衣机5号",
+      "qrCode": "GT1904205207A",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生洗衣机17号",
+      "qrCode": "GT1904205466A",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生洗衣机16号",
+      "qrCode": "GT1904205475A",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生烘干机43号",
+      "qrCode": "GT1808110210B1",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生烘干机39号",
+      "qrCode": "GT1808110822B1",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生烘干机31号",
+      "qrCode": "GT1808110212B1",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "男生洗衣机7号",
+      "qrCode": "GT1904205204A",
+      "goodsId": "",
+      "shopId": "",
+      "shopName": "",
+      "categoryCode": "",
+      "categoryName": "",
+      "addedAt": ""
+    },
+    {
+      "label": "11栋07楼01号机",
+      "qrCode": "GT1904205991A",
+      "goodsId": "10661674",
+      "shopId": "1000033452",
+      "shopName": "南科大11栋3-17楼洗衣房",
+      "categoryCode": "00",
+      "categoryName": "洗衣机",
+      "addedAt": "2026-03-29T22:16:44+08:00"
+    }
+  ]
 }

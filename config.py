@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 MACHINES_FILE = BASE_DIR / 'machines.json'
@@ -75,10 +76,78 @@ if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-def load_machines():
+def _machine_store_payload(favorites: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    return {
+        'version': 2,
+        'favorites': favorites or [],
+    }
+
+
+def _clean_machine_value(value: Any) -> str:
+    return str(value or '').strip()
+
+
+def _normalize_machine_record(item: Any, fallback_label: str = '') -> dict[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+
+    qr_code = _clean_machine_value(item.get('qrCode') or item.get('code'))
+    if not qr_code:
+        return None
+
+    record = {
+        'label': _clean_machine_value(item.get('label') or item.get('name') or fallback_label) or qr_code,
+        'qrCode': qr_code,
+        'goodsId': _clean_machine_value(item.get('goodsId') or item.get('id')),
+        'shopId': _clean_machine_value(item.get('shopId')),
+        'shopName': _clean_machine_value(item.get('shopName')),
+        'categoryCode': _clean_machine_value(item.get('categoryCode')),
+        'categoryName': _clean_machine_value(item.get('categoryName')),
+        'addedAt': _clean_machine_value(item.get('addedAt')),
+    }
+    return record
+
+
+def normalize_machine_store(data: Any) -> list[dict[str, str]]:
+    if isinstance(data, dict) and isinstance(data.get('favorites'), list):
+        raw_items = data.get('favorites') or []
+    elif isinstance(data, list):
+        raw_items = data
+    elif isinstance(data, dict):
+        raw_items = [{'label': label, 'qrCode': qr_code} for label, qr_code in data.items()]
+    else:
+        raw_items = []
+
+    favorites: list[dict[str, str]] = []
+    seen_qr_codes: set[str] = set()
+    for raw_item in raw_items:
+        record = _normalize_machine_record(raw_item)
+        if not record:
+            continue
+        qr_code = record['qrCode']
+        if qr_code in seen_qr_codes:
+            continue
+        seen_qr_codes.add(qr_code)
+        favorites.append(record)
+    return favorites
+
+
+def load_machines() -> list[dict[str, str]]:
+    if not MACHINES_FILE.exists():
+        return []
+
     with MACHINES_FILE.open('r', encoding='utf-8') as f:
         data = json.load(f)
-    return data
+    return normalize_machine_store(data)
+
+
+def save_machines(favorites: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
+    normalized = normalize_machine_store(_machine_store_payload(favorites or []))
+    payload = _machine_store_payload(normalized)
+    temp_file = MACHINES_FILE.with_name(f'{MACHINES_FILE.name}.tmp')
+    temp_file.write_text(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n", encoding='utf-8')
+    temp_file.replace(MACHINES_FILE)
+    return normalized
 
 
 def get_haile_token() -> str:
