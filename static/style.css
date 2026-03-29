@@ -534,6 +534,17 @@ label > select {
     line-height: 1.4;
 }
 
+.machine-row-card {
+    padding: 11px 12px;
+}
+
+.machine-row-card .row-card-subtitle {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
 .compact-main {
     min-width: 0;
 }
@@ -623,7 +634,26 @@ label > select {
 }
 
 .reservation-card .compact-card-head {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+}
+
+.reservation-main {
+    display: grid;
+    gap: 2px;
+}
+
+.reservation-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
     gap: 8px;
+}
+
+.reservation-title-row h4 {
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 .reservation-card .compact-main h4 {
@@ -631,21 +661,11 @@ label > select {
 }
 
 .reservation-card .compact-main p {
-    margin-top: 2px;
-}
-
-.reservation-card .compact-side {
-    gap: 4px;
-}
-
-.reservation-card .compact-side-value {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--muted);
+    margin-top: 0;
 }
 
 .reservation-meta-row {
-    margin-top: 6px;
+    margin-top: 4px;
     gap: 5px;
 }
 
@@ -663,6 +683,21 @@ label > select {
 .reservation-callout {
     padding: 10px 12px;
     border-radius: 14px;
+}
+
+.scan-machine-status {
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.62);
+    border: 1px solid var(--line);
+}
+
+.scan-machine-status .compact-meta-row {
+    margin-top: 8px;
+}
+
+.scan-machine-status-empty {
+    color: var(--muted);
 }
 
 .reservation-actions {

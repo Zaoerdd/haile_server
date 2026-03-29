@@ -376,6 +376,13 @@ def build_todo_payload(order_detail: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def fetch_laundry_rooms(client: HaierClient, lng: float, lat: float) -> Dict[str, Any]:
+    rooms_res = client.use_position_list(lng=lng, lat=lat, page=1, page_size=20)
+    if not rooms_res.get('ok'):
+        rooms_res = client.near_positions(lng=lng, lat=lat, page=1, page_size=20)
+    return rooms_res
+
+
 def fetch_all_room_machines(client: HaierClient, position_id: str, category_code: str = '00', floor_code: str = '') -> Dict[str, Any]:
     page = 1
     items: list[Dict[str, Any]] = []
@@ -391,6 +398,45 @@ def fetch_all_room_machines(client: HaierClient, position_id: str, category_code
             break
         page += 1
     return {'ok': True, 'data': {'items': items, 'total': total or len(items)}}
+
+
+def find_scan_machine_status(client: HaierClient, qr_code: str, *, lng: float, lat: float) -> Dict[str, Any]:
+    normalized_qr_code = str(qr_code or '').strip()
+    if not normalized_qr_code:
+        return {'ok': False, 'msg': '缺少扫码机组编号', 'error_type': 'missing_qr_code'}
+
+    rooms_res = fetch_laundry_rooms(client, lng, lat)
+    if not rooms_res.get('ok'):
+        return rooms_res
+
+    room_items = ((rooms_res.get('data') or {}).get('items') or [])
+    for room_item in room_items:
+        room = normalize_room(room_item)
+        position_id = room.get('id')
+        if not position_id:
+            continue
+
+        machines_res = fetch_all_room_machines(client, position_id=position_id)
+        if not machines_res.get('ok'):
+            return machines_res
+
+        for machine_item in ((machines_res.get('data') or {}).get('items') or []):
+            machine = normalize_machine(machine_item, find_scan_mapping(machine_item.get('name') or ''))
+            if str(machine.get('scanCode') or '').strip() != normalized_qr_code:
+                continue
+            return {
+                'ok': True,
+                'matched': True,
+                'room': room,
+                'machine': machine,
+            }
+
+    return {
+        'ok': True,
+        'matched': False,
+        'room': None,
+        'machine': None,
+    }
 
 
 @app.route('/')
@@ -463,9 +509,7 @@ def laundry_sections():
 
     lng, lat = get_location()
     client = HaierClient(token)
-    rooms_res = client.use_position_list(lng=lng, lat=lat, page=1, page_size=20)
-    if not rooms_res.get('ok'):
-        rooms_res = client.near_positions(lng=lng, lat=lat, page=1, page_size=20)
+    rooms_res = fetch_laundry_rooms(client, lng, lat)
     if not rooms_res.get('ok'):
         return json_error(rooms_res.get('msg') or '获取洗衣房列表失败。', error_type=rooms_res.get('error_type', 'room_list_failed'), debug=rooms_res.get('raw'))
 
@@ -533,6 +577,32 @@ def room_machines(position_id: str):
             'room': room,
             'floors': floors_res.get('data') or [],
             'machines': machines,
+        }
+    )
+
+
+@app.route('/api/laundry/scan-machines/<qr_code>/status', methods=['GET'])
+def scan_machine_status(qr_code: str):
+    token = get_required_token()
+    if not token:
+        return jsonify(build_token_missing_payload()), 400
+
+    lng, lat = get_location()
+    client = HaierClient(token)
+    status_res = find_scan_machine_status(client, qr_code, lng=lng, lat=lat)
+    if not status_res.get('ok'):
+        return json_error(
+            status_res.get('msg') or '获取扫码机组状态失败。',
+            error_type=status_res.get('error_type', 'scan_machine_status_failed'),
+            debug=status_res.get('raw'),
+        )
+
+    return jsonify(
+        {
+            'status': 'success',
+            'matched': bool(status_res.get('matched')),
+            'room': status_res.get('room'),
+            'machine': status_res.get('machine'),
         }
     )
 

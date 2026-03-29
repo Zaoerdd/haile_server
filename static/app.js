@@ -89,6 +89,7 @@ const cache = {
     roomMachines: new Map(),
     machineDetails: new Map(),
     scanModes: new Map(),
+    scanMachineStatus: new Map(),
     orderDetails: new Map(),
 };
 
@@ -240,14 +241,9 @@ function bindElements() {
 function bindEvents() {
     el.tabButtons.forEach(button => {
         button.addEventListener('click', () => {
-            const tabId = button.dataset.tab;
-            if (tabId === state.activeTab) {
-                refreshActiveTab({ reason: 'manual', silent: false, force: true }).catch(error => {
-                    handleRequestError(error, '刷新页面失败。', true);
-                });
-                return;
-            }
-            switchTab(tabId);
+            openTabRoot(button.dataset.tab).catch(error => {
+                handleRequestError(error, '切换页面失败。', true);
+            });
         });
     });
 
@@ -500,9 +496,14 @@ async function refreshWashCurrentView(reason = 'manual') {
     if (currentView === 'scan' && state.wash.scanMachine && state.wash.scanMachine.qrCode) {
         const selectedMode = getSelectedValue('scanModeSelect');
         const localMachine = (state.wash.scanMachines || []).find(item => item.qrCode === state.wash.scanMachine.qrCode);
+        const [modes, linkedStatus] = await Promise.all([
+            getScanModes(state.wash.scanMachine.qrCode, { forceRefresh: true }),
+            getScanMachineStatus(state.wash.scanMachine.qrCode, { forceRefresh: true }),
+        ]);
         state.wash.scanMachine = {
             ...(localMachine || state.wash.scanMachine),
-            modes: await getScanModes(state.wash.scanMachine.qrCode, { forceRefresh: true }),
+            modes,
+            linkedStatus,
         };
         renderWash();
         restoreSelectValue('scanModeSelect', selectedMode);
@@ -724,6 +725,75 @@ function switchTab(tabId, options = {}) {
     }
 
     scheduleActiveAutoRefresh();
+}
+
+function scrollToPageTop() {
+    if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') {
+        return;
+    }
+    window.scrollTo({ top: 0, left: 0 });
+}
+
+function resetWashTabToRoot() {
+    clearWashTransientState();
+    state.wash.view = 'home';
+    state.wash.loading = false;
+}
+
+function resetOrderTabToRoot() {
+    state.orders.expanded = {};
+}
+
+function shouldPushRootHistory(previousTab, nextTab) {
+    if (!state.historyReady) {
+        return false;
+    }
+    if (previousTab !== nextTab) {
+        return true;
+    }
+    if (nextTab === 'washTab' && state.wash.view !== 'home') {
+        return true;
+    }
+    return false;
+}
+
+function resetTabToRoot(tabId) {
+    if (tabId === 'washTab') {
+        resetWashTabToRoot();
+        renderWash();
+        return;
+    }
+    if (tabId === 'orderTab') {
+        resetOrderTabToRoot();
+        renderOrders();
+        return;
+    }
+    if (tabId === 'reservationTab') {
+        renderReservations();
+        return;
+    }
+    if (tabId === 'settingsTab') {
+        renderSettings();
+    }
+}
+
+async function openTabRoot(tabId) {
+    const safeTab = VALID_TABS.has(tabId) ? tabId : 'washTab';
+    const previousTab = state.activeTab;
+    const shouldPushHistory = shouldPushRootHistory(previousTab, safeTab);
+
+    switchTab(safeTab, { pushHistory: false, refresh: false });
+    resetTabToRoot(safeTab);
+    renderGlobalRefresh();
+    scrollToPageTop();
+
+    if (shouldPushHistory) {
+        pushHistoryState();
+    } else {
+        replaceHistoryState();
+    }
+
+    await refreshActiveTab({ reason: 'tab-root', silent: true, force: true });
 }
 
 function normalizeTokenStatus(tokenStatus = {}) {
@@ -1184,6 +1254,21 @@ async function getScanModes(qrCode, options = {}) {
     return result;
 }
 
+async function getScanMachineStatus(qrCode, options = {}) {
+    const { forceRefresh = false } = options;
+    if (!forceRefresh && cache.scanMachineStatus.has(qrCode)) {
+        return cache.scanMachineStatus.get(qrCode);
+    }
+    const data = await apiGet(`/api/laundry/scan-machines/${encodeURIComponent(qrCode)}/status`);
+    const result = {
+        matched: Boolean(data.matched),
+        room: data.room || null,
+        machine: data.machine || null,
+    };
+    cache.scanMachineStatus.set(qrCode, result);
+    return result;
+}
+
 async function getOrderDetail(orderNo, forceRefresh = false) {
     if (!forceRefresh && cache.orderDetails.has(orderNo)) {
         return cache.orderDetails.get(orderNo);
@@ -1603,6 +1688,8 @@ function renderWashScanView() {
                     <span class="compact-side-value">${modeOptions.length} 个模式</span>
                 </div>
             </div>
+            <div class="spacer-sm"></div>
+            ${renderScanMachineStatusSummary(machine.linkedStatus)}
             <label class="mode-select">
                 选择模式
                 ${renderSelect('scanModeSelect', modeOptions, '请选择模式')}
@@ -1734,6 +1821,20 @@ function renderReservations() {
         <section class="panel-card">
             <div class="compact-summary">
                 <div class="compact-main">
+                    <h3>预约任务</h3>
+                </div>
+                <div class="compact-summary-side">
+                    <span class="chip pending">${items.length} 个</span>
+                </div>
+            </div>
+            <div class="spacer-sm"></div>
+            <div class="reservation-list">
+                ${items.length ? items.map(renderReservationCard).join('') : renderEmptyState('暂无预约任务', '创建后会在这里显示每次保单窗口和最近一次执行结果。')}
+            </div>
+        </section>
+        <section class="panel-card">
+            <div class="compact-summary">
+                <div class="compact-main">
                     <h3>调度器状态</h3>
                     <p>轮询间隔修改后会立即生效。</p>
                 </div>
@@ -1749,20 +1850,6 @@ function renderReservations() {
                 <div><span>最近补建</span><span>${escapeHtml(stringOrFallback((scheduler.lastResult || {}).recreated, 0))}</span></div>
             </div>
             ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
-        </section>
-        <section class="panel-card">
-            <div class="compact-summary">
-                <div class="compact-main">
-                    <h3>预约任务</h3>
-                </div>
-                <div class="compact-summary-side">
-                    <span class="chip pending">${items.length} 个</span>
-                </div>
-            </div>
-            <div class="spacer-sm"></div>
-            <div class="reservation-list">
-                ${items.length ? items.map(renderReservationCard).join('') : renderEmptyState('暂无预约任务', '创建后会在这里显示每次保单窗口和最近一次执行结果。')}
-            </div>
         </section>
     `;
 }
@@ -1926,32 +2013,29 @@ function renderScanMachineCard(machine) {
 }
 
 function renderRoomMachineCard(machine) {
-    const subtitle = uniqueSubtitle(machine.name || '设备', machine.floorCode || '');
-    const timeText = machine.finishTimeText
-        ? `预计 ${machine.finishTimeText}`
-        : (machine.statusLabel === '空闲' ? '现在可用' : (machine.statusDetail || '--'));
-    const detailText = machine.statusDetail && machine.statusDetail !== timeText ? machine.statusDetail : '';
+    const subtitle = joinCompactText([machine.floorCode || '', machineAvailabilityDetail(machine)]);
+    const timeText = machineAvailabilityText(machine);
     return `
-        <article class="machine-card">
-            <div class="compact-card-head">
-                <div class="compact-main">
+        <article
+            class="list-card row-card clickable-card machine-row-card"
+            role="button"
+            tabindex="0"
+            data-clickable-card="true"
+            data-action="open-machine"
+            data-goods-id="${escapeHtml(machine.goodsId)}"
+            aria-label="查看${escapeHtml(machine.name || '设备')}详情"
+        >
+            <div class="row-card-main">
+                <div class="row-card-head">
                     <h4>${escapeHtml(machine.name || '设备')}</h4>
-                    ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+                    <div class="row-card-pills">
+                        <span class="chip ${machineChipClass(machine)}">${escapeHtml(machine.statusLabel || machine.stateDesc || '未知')}</span>
+                        <span class="chip info">${escapeHtml(timeText)}</span>
+                    </div>
                 </div>
-                <div class="compact-side">
-                    <span class="chip ${machineChipClass(machine)}">${escapeHtml(machine.statusLabel || machine.stateDesc || '未知')}</span>
-                    <span class="compact-side-value">${escapeHtml(timeText)}</span>
-                </div>
+                ${subtitle ? `<p class="row-card-subtitle">${escapeHtml(subtitle)}</p>` : ''}
             </div>
-            <div class="compact-meta-row">
-                ${detailText ? renderMetaPill('状态', detailText) : ''}
-                ${machine.floorCode ? renderMetaPill('楼层', machine.floorCode) : ''}
-            </div>
-            <div class="spacer-sm"></div>
-            <div class="compact-actions">
-                <button class="btn btn-secondary" type="button" data-action="open-machine" data-goods-id="${escapeHtml(machine.goodsId)}">查看详情</button>
-                ${machine.supportsVirtualScan && machine.scanCode ? `<button class="btn btn-light" type="button" data-action="open-scan" data-qr-code="${escapeHtml(machine.scanCode)}">虚拟扫码</button>` : ''}
-            </div>
+            ${renderCardIcon()}
         </article>
     `;
 }
@@ -1977,6 +2061,7 @@ function renderReservationCard(task) {
     const orderStateText = String((currentOrder || {}).stateDesc || '').trim();
     const activeOrderText = String(task.activeOrderNo || '').trim();
     const metaItems = [
+        renderMetaPill('计划', scheduleText),
         renderMetaPill('保单窗口', formatWindow(task.startAt, task.holdUntil))
     ];
     if (activeOrderText && !textAppearsInMessages(noticeMessages, activeOrderText)) {
@@ -1992,13 +2077,12 @@ function renderReservationCard(task) {
     return `
         <article class="order-card reservation-card">
             <div class="compact-card-head">
-                <div class="compact-main">
-                    <h4>${escapeHtml(title)}</h4>
+                <div class="compact-main reservation-main">
+                    <div class="reservation-title-row">
+                        <h4>${escapeHtml(title)}</h4>
+                        <span class="chip ${statusClass}">${escapeHtml(reservationStatusLabel(task.status))}</span>
+                    </div>
                     ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
-                </div>
-                <div class="compact-side">
-                    <span class="chip ${statusClass}">${escapeHtml(reservationStatusLabel(task.status))}</span>
-                    <span class="compact-side-value">${escapeHtml(scheduleText)}</span>
                 </div>
             </div>
             <div class="compact-meta-row reservation-meta-row">
@@ -2305,11 +2389,16 @@ async function openMachine(goodsId, options = {}) {
 async function openScanMachine(qrCode, options = {}) {
     const localMachine = (state.wash.scanMachines || []).find(item => item.qrCode === qrCode);
     state.wash.loading = true;
-    renderWashLoading('正在读取可用模式...');
+    renderWashLoading('正在读取可用模式和设备状态...');
     try {
+        const [modes, linkedStatus] = await Promise.all([
+            getScanModes(qrCode),
+            getScanMachineStatus(qrCode),
+        ]);
         state.wash.scanMachine = {
             ...(localMachine || { label: options.label || '虚拟扫码设备', qrCode }),
-            modes: await getScanModes(qrCode),
+            modes,
+            linkedStatus,
         };
         state.wash.view = 'scan';
         state.wash.machineDetail = null;
@@ -2915,6 +3004,63 @@ function renderOrderTimeGrid(order) {
         <div class="detail-grid">
             <div><span>${escapeHtml(meta.label)}</span><span>${escapeHtml(formatDateTime(meta.value))}</span></div>
             <div><span>${escapeHtml(meta.countdownLabel)}</span><span>${escapeHtml(meta.countdownText)}</span></div>
+        </div>
+    `;
+}
+
+function machineAvailabilityText(machine) {
+    if (!machine) {
+        return '--';
+    }
+    if (machine.finishTimeText) {
+        return `预计 ${machine.finishTimeText}`;
+    }
+    if (machine.statusLabel === '空闲') {
+        return '现在可用';
+    }
+    return machine.statusDetail || '--';
+}
+
+function machineAvailabilityDetail(machine) {
+    const detailText = String((machine || {}).statusDetail || '').trim();
+    const timeText = machineAvailabilityText(machine);
+    if (!detailText || detailText === '--' || detailText === timeText) {
+        return '';
+    }
+    return detailText;
+}
+
+function renderScanMachineStatusSummary(linkedStatus) {
+    if (!linkedStatus) {
+        return '<div class="callout scan-machine-status scan-machine-status-empty">正在读取对应设备状态...</div>';
+    }
+    if (!linkedStatus.matched || !linkedStatus.machine) {
+        return '<div class="callout scan-machine-status scan-machine-status-empty">暂无对应设备状态</div>';
+    }
+
+    const machine = linkedStatus.machine || {};
+    const room = linkedStatus.room || {};
+    const subtitle = uniqueSubtitle(machine.name || '对应设备', room.name || room.address || '');
+    const metaItems = [
+        room.address ? renderMetaPill('位置', room.address) : '',
+        machine.floorCode ? renderMetaPill('楼层', machine.floorCode) : '',
+        machineAvailabilityDetail(machine) ? renderMetaPill('状态', machineAvailabilityDetail(machine)) : '',
+        machine.goodsId ? renderMetaPill('设备编号', machine.goodsId) : '',
+    ].filter(Boolean).join('');
+
+    return `
+        <div class="scan-machine-status">
+            <div class="compact-card-head">
+                <div class="compact-main">
+                    <h4>对应洗衣房设备</h4>
+                    ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
+                </div>
+                <div class="compact-side">
+                    <span class="chip ${machineChipClass(machine)}">${escapeHtml(machine.statusLabel || machine.stateDesc || '未知')}</span>
+                    <span class="compact-side-value">${escapeHtml(machineAvailabilityText(machine))}</span>
+                </div>
+            </div>
+            ${metaItems ? `<div class="compact-meta-row">${metaItems}</div>` : ''}
         </div>
     `;
 }
