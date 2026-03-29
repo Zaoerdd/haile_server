@@ -41,19 +41,20 @@ NO_ADOPTABLE_PENDING_ORDER_MESSAGE = '没有找到可接手的最终待付款订
 HISTORY_ORDER_LOOKUP_PAGE_SIZE = 20
 EARLY_RENEW_LEAD_SECONDS = 60
 try:
-    REMOTE_ORDER_TIMEZONE = ZoneInfo('Asia/Shanghai')
+    REMOTE_APP_TIMEZONE = ZoneInfo('Asia/Shanghai')
 except ZoneInfoNotFoundError:
-    REMOTE_ORDER_TIMEZONE = timezone(timedelta(hours=8))
+    REMOTE_APP_TIMEZONE = timezone(timedelta(hours=8))
+REMOTE_ORDER_TIMEZONE = REMOTE_APP_TIMEZONE
 
 
 def now_local() -> datetime:
-    return datetime.now().astimezone()
+    return datetime.now(tz=REMOTE_APP_TIMEZONE)
 
 
 def to_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return value.astimezone().isoformat()
+    return value.astimezone(REMOTE_APP_TIMEZONE).isoformat()
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -61,8 +62,8 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=now_local().tzinfo)
-    return parsed.astimezone()
+        return parsed.replace(tzinfo=REMOTE_APP_TIMEZONE)
+    return parsed.astimezone(REMOTE_APP_TIMEZONE)
 
 
 def parse_remote_order_time(value: str | None) -> datetime | None:
@@ -70,8 +71,8 @@ def parse_remote_order_time(value: str | None) -> datetime | None:
         return None
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=REMOTE_ORDER_TIMEZONE).astimezone()
-    return parsed.astimezone()
+        return parsed.replace(tzinfo=REMOTE_ORDER_TIMEZONE).astimezone(REMOTE_APP_TIMEZONE)
+    return parsed.astimezone(REMOTE_APP_TIMEZONE)
 
 
 def parse_time_of_day(value: str) -> tuple[int, int]:
@@ -102,7 +103,7 @@ def resolve_timezone(timezone_name: str | None):
             return ZoneInfo(timezone_name)
         except ZoneInfoNotFoundError:
             pass
-    return now_local().tzinfo or timezone.utc
+    return REMOTE_APP_TIMEZONE
 
 
 def next_weekly_target(weekday: int, time_of_day: str, reference: datetime | None = None, timezone_name: str | None = None) -> datetime:

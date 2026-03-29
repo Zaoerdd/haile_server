@@ -28,6 +28,7 @@ if 'requests' not in sys.modules:
         RequestException=_DummyRequestException,
     )
 
+import services.reservation_service as reservation_module
 from services.reservation_service import reservation_service
 
 
@@ -174,6 +175,34 @@ class ReservationSchedulerDelayTests(unittest.TestCase):
         delay = reservation_service.next_poll_delay_seconds(30)
 
         self.assertEqual(delay, 30)
+
+
+class ReservationTimezoneDefaultsTests(unittest.TestCase):
+    def test_now_local_uses_fixed_shanghai_timezone(self):
+        current = reservation_module.now_local()
+
+        self.assertEqual(current.utcoffset(), reservation_module.REMOTE_APP_TIMEZONE.utcoffset(current))
+
+    def test_parse_iso_treats_naive_values_as_shanghai_time(self):
+        parsed = reservation_module.parse_iso('2026-03-30T08:00:00')
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.utcoffset(), reservation_module.REMOTE_APP_TIMEZONE.utcoffset(parsed))
+        self.assertEqual(parsed.hour, 8)
+        self.assertEqual(parsed.minute, 0)
+
+    def test_parse_iso_converts_aware_values_into_shanghai_timezone(self):
+        parsed = reservation_module.parse_iso('2026-03-30T00:00:00+00:00')
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.utcoffset(), reservation_module.REMOTE_APP_TIMEZONE.utcoffset(parsed))
+        self.assertEqual(parsed.hour, 8)
+        self.assertEqual(parsed.minute, 0)
+
+    def test_resolve_timezone_defaults_to_fixed_shanghai_timezone(self):
+        resolved = reservation_module.resolve_timezone(None)
+
+        self.assertEqual(resolved.utcoffset(None), reservation_module.REMOTE_APP_TIMEZONE.utcoffset(None))
 
 
 class ReservationEarlyRenewTests(unittest.TestCase):

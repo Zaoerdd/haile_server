@@ -45,9 +45,11 @@ const state = {
     historyRestoring: false,
     wash: {
         loading: true,
+        homeLoaded: false,
         rooms: [],
         scanMachines: [],
         view: 'home',
+        machineHostView: null,
         roomId: null,
         roomCategoryCode: '',
         roomData: null,
@@ -84,6 +86,8 @@ const state = {
         activeRefreshPromise: null,
         pendingRefreshRequest: null,
         autoRefreshTimer: null,
+        favoriteStatusRequestId: 0,
+        roomRequestId: 0,
     },
 };
 
@@ -173,11 +177,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     switchTab(state.activeTab, { pushHistory: false });
 
     try {
-        await loadConfig();
-        await loadSettings();
-        await loadReservations();
+        const configPromise = loadConfig();
+        const settingsPromise = loadSettings();
+        const reservationsPromise = loadReservations({ rethrow: true });
+
+        await configPromise;
+        const laundryPromise = isTokenReady()
+            ? loadLaundrySections({ showToast: false, preserveView: false })
+            : Promise.resolve();
+
+        await Promise.all([
+            settingsPromise,
+            reservationsPromise,
+            laundryPromise,
+        ]);
         if (isTokenReady()) {
-            await loadLaundrySections({ showToast: false, preserveView: false });
             await hydrateReservationForm();
         } else {
             renderWash();
@@ -479,19 +493,28 @@ async function refreshWashCurrentView(reason = 'manual') {
     const currentView = state.wash.view || 'home';
     if ((currentView === 'room' || currentView === 'machine') && (state.wash.roomId || state.wash.machineId)) {
         const selectedMode = getSelectedValue('washModeSelect');
-        if (state.wash.roomId) {
-            state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
+        const shouldRefreshRoom = currentView === 'room' || (currentView === 'machine' && state.wash.machineHostView !== 'home');
+        const roomPromise = shouldRefreshRoom && state.wash.roomId
+            ? getRoomMachines(state.wash.roomId, { forceRefresh: true, categoryCode: state.wash.roomCategoryCode || '' })
+            : Promise.resolve(null);
+        const machinePromise = state.wash.machineId
+            ? getMachineDetail(state.wash.machineId, { forceRefresh: true })
+            : Promise.resolve(null);
+        const [roomData, machineDetail] = await Promise.all([roomPromise, machinePromise]);
+        if (roomData) {
+            state.wash.roomData = roomData;
         }
-        if (state.wash.machineId) {
-            state.wash.machineDetail = await getMachineDetail(state.wash.machineId, { forceRefresh: true });
+        if (machineDetail) {
+            state.wash.machineDetail = machineDetail;
             const machineRoomId = String((state.wash.machineDetail || {}).shopId || '').trim();
-            if (!state.wash.roomId && machineRoomId) {
+            if (shouldRefreshRoom && !state.wash.roomId && machineRoomId) {
                 state.wash.roomId = machineRoomId;
-                state.wash.roomData = await getRoomMachines(machineRoomId, { forceRefresh: true });
+                state.wash.roomCategoryCode = state.wash.roomCategoryCode || String((state.wash.machineDetail || {}).categoryCode || '').trim();
+                state.wash.roomData = await getRoomMachines(machineRoomId, {
+                    forceRefresh: true,
+                    categoryCode: state.wash.roomCategoryCode || '',
+                });
             }
-        }
-        if (currentView === 'machine') {
-            state.wash.view = 'room';
         }
         renderWash();
         restoreSelectValue('washModeSelect', selectedMode);
@@ -967,13 +990,87 @@ function getFavoriteMachinesFromPayload(data) {
     return data && Array.isArray(data.scanMachines) ? data.scanMachines : [];
 }
 
+function mergeFavoriteStatuses(scanMachines) {
+    const machines = Array.isArray(scanMachines) ? scanMachines : [];
+    const previousStatuses = new Map(
+        (state.wash.scanMachines || []).map(machine => [machine.qrCode, machine.linkedStatus || null])
+    );
+    return machines.map(machine => ({
+        ...machine,
+        linkedStatus: previousStatuses.get(machine.qrCode) || cache.scanMachineStatus.get(machine.qrCode) || null,
+    }));
+}
+
+function applyFavoriteStatuses(items) {
+    const statuses = Array.isArray(items) ? items : [];
+    const byQrCode = new Map(
+        statuses
+            .filter(item => item && item.qrCode)
+            .map(item => [
+                item.qrCode,
+                {
+                    matched: Boolean(item.matched),
+                    room: item.room || null,
+                    machine: item.machine || null,
+                },
+            ])
+    );
+    byQrCode.forEach((status, qrCode) => {
+        cache.scanMachineStatus.set(qrCode, status);
+    });
+    state.wash.scanMachines = (state.wash.scanMachines || []).map(machine => ({
+        ...machine,
+        linkedStatus: byQrCode.has(machine.qrCode)
+            ? byQrCode.get(machine.qrCode)
+            : (machine.linkedStatus || cache.scanMachineStatus.get(machine.qrCode) || null),
+    }));
+    if (state.wash.scanMachine && state.wash.scanMachine.qrCode && byQrCode.has(state.wash.scanMachine.qrCode)) {
+        state.wash.scanMachine = {
+            ...state.wash.scanMachine,
+            linkedStatus: byQrCode.get(state.wash.scanMachine.qrCode),
+        };
+    }
+}
+
+async function fetchFavoriteStatuses(options = {}) {
+    const { forceRefresh = false } = options;
+    const suffix = forceRefresh ? '?force=1' : '';
+    const data = await apiGet(`/api/laundry/favorites/statuses${suffix}`);
+    return data.items || [];
+}
+
+async function refreshFavoriteStatusesInBackground(options = {}) {
+    const { forceRefresh = false, renderWhenDone = true, silent = true } = options;
+    const requestId = ++state.ui.favoriteStatusRequestId;
+    if (!(state.wash.scanMachines || []).length) {
+        return [];
+    }
+    try {
+        const items = await fetchFavoriteStatuses({ forceRefresh });
+        if (requestId !== state.ui.favoriteStatusRequestId) {
+            return [];
+        }
+        applyFavoriteStatuses(items);
+        if (renderWhenDone) {
+            renderWash();
+        }
+        return items;
+    } catch (error) {
+        if (!silent) {
+            syncTokenFailure(error);
+            handleRequestError(error, '读取收藏设备状态失败。', true);
+        }
+        return [];
+    }
+}
+
 async function syncFavoriteMachines(scanMachines, options = {}) {
     const { hydrateStatus = false, forceRefresh = false } = options;
-    const machines = Array.isArray(scanMachines) ? scanMachines : [];
-    state.wash.scanMachines = hydrateStatus
-        ? await hydrateScanMachineStatuses(machines, { forceRefresh })
-        : machines;
+    state.wash.scanMachines = mergeFavoriteStatuses(scanMachines);
     populateReservationScanOptions();
+    if (hydrateStatus && state.wash.scanMachines.length) {
+        await refreshFavoriteStatusesInBackground({ forceRefresh, renderWhenDone: false, silent: true });
+    }
     return state.wash.scanMachines;
 }
 
@@ -1030,16 +1127,22 @@ async function loadSettings() {
 }
 
 async function loadLaundrySections({ showToast = false, preserveView = false } = {}) {
-    state.wash.loading = true;
+    const shouldBlock = !state.wash.homeLoaded && !(state.wash.rooms || []).length && !(state.wash.scanMachines || []).length;
+    state.wash.loading = shouldBlock;
     if (!preserveView) {
         state.wash.view = 'home';
     }
-    renderWashLoading('正在加载洗衣房和收藏...');
+    if (shouldBlock) {
+        renderWashLoading('正在加载洗衣房和收藏...');
+    } else {
+        renderWash();
+    }
 
     try {
         const data = await apiGet('/api/laundry/sections');
         state.wash.rooms = data.rooms || [];
-        await syncFavoriteMachines(getFavoriteMachinesFromPayload(data), { hydrateStatus: true, forceRefresh: true });
+        await syncFavoriteMachines(getFavoriteMachinesFromPayload(data));
+        state.wash.homeLoaded = true;
         state.wash.loading = false;
         if (!preserveView) {
             clearWashTransientState();
@@ -1047,6 +1150,7 @@ async function loadLaundrySections({ showToast = false, preserveView = false } =
         }
         markTabRefreshed('washTab');
         renderWash();
+        refreshFavoriteStatusesInBackground({ forceRefresh: true, renderWhenDone: true, silent: true });
         if (showToast) {
             showToastMessage('洗衣页面已刷新。');
         }
@@ -1279,13 +1383,26 @@ async function refreshOrdersSnapshot() {
     return loaded;
 }
 
+function buildRoomMachinesCacheKey(positionId, categoryCode = '') {
+    return `${String(positionId || '').trim()}::${String(categoryCode || '').trim()}`;
+}
+
 async function getRoomMachines(positionId, options = {}) {
-    const { forceRefresh = false } = options;
-    if (!forceRefresh && cache.roomMachines.has(positionId)) {
-        return cache.roomMachines.get(positionId);
+    const { forceRefresh = false, categoryCode = '' } = options;
+    const cacheKey = buildRoomMachinesCacheKey(positionId, categoryCode);
+    if (!forceRefresh && cache.roomMachines.has(cacheKey)) {
+        return cache.roomMachines.get(cacheKey);
     }
-    const data = await apiGet(`/api/laundry/rooms/${encodeURIComponent(positionId)}/machines`);
-    cache.roomMachines.set(positionId, data);
+    const query = new URLSearchParams();
+    if (categoryCode) {
+        query.set('categoryCode', categoryCode);
+    }
+    if (forceRefresh) {
+        query.set('force', '1');
+    }
+    const url = `/api/laundry/rooms/${encodeURIComponent(positionId)}/machines${query.toString() ? `?${query.toString()}` : ''}`;
+    const data = await apiGet(url);
+    cache.roomMachines.set(cacheKey, data);
     return data;
 }
 
@@ -1341,31 +1458,6 @@ async function addFavoriteMachine(machine) {
 async function removeFavoriteMachine(qrCode) {
     const data = await apiDelete(`/api/laundry/favorites/${encodeURIComponent(qrCode)}`);
     return getFavoriteMachinesFromPayload(data);
-}
-
-async function hydrateScanMachineStatuses(scanMachines, options = {}) {
-    const machines = Array.isArray(scanMachines) ? scanMachines : [];
-    if (!machines.length) {
-        return [];
-    }
-
-    const { forceRefresh = false } = options;
-    const previousStatusByQrCode = new Map(
-        (state.wash.scanMachines || []).map(machine => [machine.qrCode, machine.linkedStatus || null])
-    );
-    const results = await Promise.allSettled(
-        machines.map(machine => getScanMachineStatus(machine.qrCode, { forceRefresh }))
-    );
-
-    return machines.map((machine, index) => {
-        const result = results[index];
-        return {
-            ...machine,
-            linkedStatus: result.status === 'fulfilled'
-                ? result.value
-                : (previousStatusByQrCode.get(machine.qrCode) || null),
-        };
-    });
 }
 
 async function getOrderDetail(orderNo, forceRefresh = false) {
@@ -1520,6 +1612,7 @@ function toggleReservationScheduleFields() {
 }
 
 function clearWashTransientState() {
+    state.wash.machineHostView = null;
     state.wash.roomId = null;
     state.wash.roomCategoryCode = '';
     state.wash.roomData = null;
@@ -1627,7 +1720,15 @@ function renderWash() {
         return;
     }
 
-    if (state.wash.view === 'room' || state.wash.view === 'machine') {
+    if (state.wash.view === 'machine') {
+        if (state.wash.machineHostView === 'home' || !state.wash.roomData) {
+            el.washView.innerHTML = renderWashHomeView();
+            return;
+        }
+        el.washView.innerHTML = renderWashRoomView();
+        return;
+    }
+    if (state.wash.view === 'room') {
         el.washView.innerHTML = renderWashRoomView();
         return;
     }
@@ -1675,6 +1776,7 @@ function renderWashHomeView() {
                 ${scanMachines.length ? scanMachines.map(renderScanMachineCard).join('') : renderEmptyState('暂无收藏机器', '请先在机器详情页点击星号收藏。')}
             </div>
         </section>
+        ${state.wash.machineHostView === 'home' ? renderWashMachineView() : ''}
     `;
 }
 
@@ -1684,6 +1786,7 @@ function renderWashRoomView() {
     const machines = payload.machines || [];
     const categories = getRoomCategoryOptions(payload, machines);
     const selectedCategoryCode = resolveSelectedRoomCategoryCode(categories);
+    const totalMachines = categories.length ? Number((categories[0] || {}).total || machines.length) : machines.length;
     const filteredMachines = selectedCategoryCode
         ? machines.filter(machine => String(machine.categoryCode || '') === selectedCategoryCode)
         : machines;
@@ -1700,7 +1803,7 @@ function renderWashRoomView() {
                     ${subtitle ? `<p>${escapeHtml(subtitle)}</p>` : ''}
                 </div>
                 <div class="compact-summary-side">
-                    <span class="chip pending">${machines.length} 台</span>
+                    <span class="chip pending">${totalMachines} 台</span>
                     <span class="compact-side-value">${escapeHtml(stringOrFallback(room.idleCount, '--'))} 空闲</span>
                 </div>
             </div>
@@ -2191,6 +2294,13 @@ function renderRoomMachineCard(machine) {
     `;
 }
 
+function getDefaultRoomCategoryCode(roomId) {
+    const room = (state.wash.rooms || []).find(item => item.id === roomId);
+    const codes = Array.isArray((room || {}).categoryCodeList) ? room.categoryCodeList : [];
+    const firstCode = codes.find(code => String(code || '').trim());
+    return String(firstCode || '').trim();
+}
+
 function getRoomCategoryOptions(payload, machines) {
     const categoryMap = new Map();
     const hasServerCategories = Array.isArray(payload.categories) && payload.categories.length > 0;
@@ -2228,12 +2338,19 @@ function getRoomCategoryOptions(payload, machines) {
         }
     });
 
+    const totalCount = hasServerCategories
+        ? Array.from(categoryMap.values()).reduce((sum, item) => sum + Number(item.total || 0), 0)
+        : (machines || []).length;
+    const idleCount = hasServerCategories
+        ? Array.from(categoryMap.values()).reduce((sum, item) => sum + Number(item.idleCount || 0), 0)
+        : Number((((payload || {}).room) || {}).idleCount || 0);
+
     return [
         {
             categoryCode: '',
             categoryName: '全部',
-            total: (machines || []).length,
-            idleCount: Number((((payload || {}).room) || {}).idleCount || 0),
+            total: totalCount,
+            idleCount,
         },
         ...Array.from(categoryMap.values()),
     ];
@@ -2508,14 +2625,16 @@ async function handleWashClick(event) {
         return;
     }
     if (action === 'back-room' || action === 'close-machine-modal') {
-        if (state.wash.roomId && state.wash.roomData) {
-            state.wash.view = 'room';
-            state.wash.machineId = null;
-            state.wash.machineDetail = null;
-            state.wash.result = null;
-        } else {
-            clearWashTransientState();
-            state.wash.view = 'home';
+        const hostView = state.wash.machineHostView === 'room' && state.wash.roomId && state.wash.roomData ? 'room' : 'home';
+        state.wash.view = hostView;
+        state.wash.machineId = null;
+        state.wash.machineDetail = null;
+        state.wash.machineHostView = null;
+        state.wash.result = null;
+        if (hostView === 'home') {
+            state.wash.roomId = null;
+            state.wash.roomCategoryCode = '';
+            state.wash.roomData = null;
         }
         renderWash();
         renderGlobalRefresh();
@@ -2524,9 +2643,7 @@ async function handleWashClick(event) {
         return;
     }
     if (action === 'set-room-category') {
-        state.wash.roomCategoryCode = String(button.dataset.categoryCode || '');
-        renderWash();
-        replaceHistoryState();
+        await switchRoomCategory(button.dataset.categoryCode || '', { pushHistory: true });
         return;
     }
 
@@ -2545,20 +2662,17 @@ async function handleWashClick(event) {
         }
         if (action === 'open-scan') {
             const goodsId = String(button.dataset.goodsId || '').trim();
-            const roomId = String(button.dataset.roomId || '').trim();
             if (goodsId) {
-                await openMachine(goodsId, { roomId: roomId || null });
+                await openMachine(goodsId, { hostView: 'home' });
                 return;
             }
             const qrCode = String(button.dataset.qrCode || '').trim();
             if (qrCode) {
                 const linkedStatus = await getScanMachineStatus(qrCode, { forceRefresh: true });
                 const linkedMachine = linkedStatus && linkedStatus.matched ? linkedStatus.machine || null : null;
-                const linkedRoom = linkedStatus && linkedStatus.matched ? linkedStatus.room || null : null;
                 const linkedGoodsId = String((linkedMachine || {}).goodsId || '').trim();
-                const linkedRoomId = String((linkedRoom || {}).id || '').trim();
                 if (linkedGoodsId) {
-                    await openMachine(linkedGoodsId, { roomId: linkedRoomId || null });
+                    await openMachine(linkedGoodsId, { hostView: 'home' });
                     return;
                 }
             }
@@ -2596,11 +2710,22 @@ async function handleWashClick(event) {
 async function openRoom(roomId, options = {}) {
     state.wash.loading = true;
     renderWashLoading('正在加载洗衣房设备...');
+    const requestId = ++state.ui.roomRequestId;
     try {
-        const payload = await getRoomMachines(roomId);
+        const nextCategoryCode = options.roomCategoryCode != null
+            ? String(options.roomCategoryCode || '')
+            : getDefaultRoomCategoryCode(roomId);
+        const payload = await getRoomMachines(roomId, {
+            forceRefresh: Boolean(options.forceRefresh),
+            categoryCode: nextCategoryCode,
+        });
+        if (requestId !== state.ui.roomRequestId) {
+            return;
+        }
         state.wash.view = 'room';
+        state.wash.machineHostView = null;
         state.wash.roomId = roomId;
-        state.wash.roomCategoryCode = String(options.roomCategoryCode || '');
+        state.wash.roomCategoryCode = String((payload && payload.selectedCategoryCode) || nextCategoryCode || '');
         state.wash.roomData = payload;
         state.wash.machineId = null;
         state.wash.machineDetail = null;
@@ -2621,34 +2746,73 @@ async function openRoom(roomId, options = {}) {
     }
 }
 
+async function switchRoomCategory(categoryCode, options = {}) {
+    const roomId = state.wash.roomId;
+    if (!roomId) {
+        return;
+    }
+    const nextCategoryCode = String(categoryCode || '');
+    const keepHistory = options.pushHistory !== false;
+    const requestId = ++state.ui.roomRequestId;
+    setTabRefreshing('washTab', true);
+    try {
+        const payload = await getRoomMachines(roomId, {
+            forceRefresh: Boolean(options.forceRefresh),
+            categoryCode: nextCategoryCode,
+        });
+        if (requestId !== state.ui.roomRequestId) {
+            return;
+        }
+        state.wash.roomCategoryCode = String((payload && payload.selectedCategoryCode) || nextCategoryCode || '');
+        state.wash.roomData = payload;
+        renderWash();
+        if (keepHistory) {
+            pushHistoryState();
+        } else {
+            replaceHistoryState();
+        }
+    } finally {
+        if (requestId === state.ui.roomRequestId) {
+            setTabRefreshing('washTab', false);
+        }
+    }
+}
+
 async function openMachine(goodsId, options = {}) {
     state.wash.loading = true;
     renderWashLoading('正在加载设备详情...');
     try {
         let targetRoomId = String(options.roomId || state.wash.roomId || '').trim();
-        if (targetRoomId && (!state.wash.roomData || state.wash.roomId !== targetRoomId)) {
-            state.wash.roomData = await getRoomMachines(targetRoomId);
-            state.wash.roomId = targetRoomId;
-        }
-        if (options.roomCategoryCode != null) {
-            state.wash.roomCategoryCode = String(options.roomCategoryCode || '');
-        }
+        const hostView = options.hostView || (targetRoomId ? 'room' : 'home');
         state.wash.machineDetail = await getMachineDetail(goodsId);
         const detailRoomId = String((state.wash.machineDetail || {}).shopId || '').trim();
-        if (!targetRoomId && detailRoomId) {
+        const detailCategoryCode = String((state.wash.machineDetail || {}).categoryCode || '').trim();
+        if (hostView !== 'home' && !targetRoomId && detailRoomId) {
             targetRoomId = detailRoomId;
         }
-        if (targetRoomId) {
-            if (!state.wash.roomData || state.wash.roomId !== targetRoomId) {
-                state.wash.roomData = await getRoomMachines(targetRoomId);
+        let nextRoomCategoryCode = options.roomCategoryCode != null
+            ? String(options.roomCategoryCode || '')
+            : (state.wash.roomId === targetRoomId ? state.wash.roomCategoryCode || '' : '');
+        if (hostView !== 'home' && targetRoomId) {
+            if (!nextRoomCategoryCode) {
+                nextRoomCategoryCode = detailCategoryCode || getDefaultRoomCategoryCode(targetRoomId);
+            }
+            if (
+                !state.wash.roomData
+                || state.wash.roomId !== targetRoomId
+                || String(state.wash.roomCategoryCode || '') !== String(nextRoomCategoryCode || '')
+            ) {
+                state.wash.roomData = await getRoomMachines(targetRoomId, { categoryCode: nextRoomCategoryCode });
             }
             state.wash.roomId = targetRoomId;
+            state.wash.roomCategoryCode = String((state.wash.roomData && state.wash.roomData.selectedCategoryCode) || nextRoomCategoryCode || '');
         } else {
             state.wash.roomId = null;
             state.wash.roomData = null;
             state.wash.roomCategoryCode = '';
         }
-        state.wash.view = 'room';
+        state.wash.view = 'machine';
+        state.wash.machineHostView = hostView;
         state.wash.machineId = goodsId;
         state.wash.scanMachine = null;
         state.wash.process = null;
@@ -2682,6 +2846,7 @@ async function openScanMachine(qrCode, options = {}) {
             linkedStatus,
         };
         state.wash.view = 'scan';
+        state.wash.machineHostView = null;
         state.wash.machineDetail = null;
         state.wash.process = null;
         state.wash.result = null;
@@ -2730,7 +2895,12 @@ async function openMachineScan() {
         await showAlertDialog('当前设备暂不支持扫码下单。');
         return;
     }
-    await openScanMachine(machine.scanCode, { label: machine.name });
+    const modeId = getSelectedValue('washModeSelect');
+    if (!modeId) {
+        await showAlertDialog('请先选择模式。');
+        return;
+    }
+    await startScanProcess({ qrCode: machine.scanCode, modeId });
 }
 
 async function openProcess(processId, options = {}) {
@@ -2749,6 +2919,7 @@ async function openProcess(processId, options = {}) {
             }
         }
         state.wash.view = 'process';
+        state.wash.machineHostView = null;
         state.wash.result = null;
         state.wash.loading = false;
         markTabRefreshed('washTab');
@@ -2790,10 +2961,10 @@ async function createLockOrder() {
     showToastMessage('线上下单已到创建订单，后续链路仍是 TODO。');
 }
 
-async function startScanProcess() {
+async function startScanProcess(options = {}) {
     const scanMachine = state.wash.scanMachine;
-    const qrCode = scanMachine ? scanMachine.qrCode : '';
-    const modeId = getSelectedValue('scanModeSelect');
+    const qrCode = String(options.qrCode || (scanMachine ? scanMachine.qrCode : '') || '').trim();
+    const modeId = String(options.modeId || getSelectedValue('scanModeSelect') || '').trim();
     if (!qrCode || !modeId) {
         await showAlertDialog('请先选择模式。');
         return;

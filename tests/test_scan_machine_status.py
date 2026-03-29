@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 
@@ -75,6 +76,10 @@ class ScanMachineStatusTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app_module = load_app_module()
 
+    def setUp(self):
+        self.app_module.room_machine_cache.clear()
+        self.app_module.favorite_status_cache.clear()
+
     def test_fetch_all_room_machines_merges_multiple_categories(self):
         client = MagicMock()
         client.position_device.return_value = {
@@ -114,6 +119,206 @@ class ScanMachineStatusTests(unittest.TestCase):
             ['Washer', 'Dryer'],
         )
 
+    def test_fetch_all_room_machines_keeps_full_category_menu_when_requesting_single_category(self):
+        client = MagicMock()
+        client.position_device.return_value = {
+            'ok': True,
+            'data': [
+                {'categoryCode': '00', 'categoryName': 'Washer', 'total': 2, 'idleCount': 1},
+                {'categoryCode': '02', 'categoryName': 'Dryer', 'total': 1, 'idleCount': 0},
+            ],
+        }
+        client.device_detail_page.return_value = {
+            'ok': True,
+            'data': {
+                'total': 1,
+                'items': [{'id': 'washer-1', 'name': 'Machine A'}],
+            },
+        }
+
+        result = self.app_module.fetch_all_room_machines(client, position_id='room-1', category_code='00', force_refresh=True)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['data']['total'], 1)
+        self.assertEqual(len(result['data']['categories']), 2)
+        self.assertEqual(
+            [item['categoryCode'] for item in result['data']['categories']],
+            ['00', '02'],
+        )
+        client.device_detail_page.assert_called_once()
+
+    def test_fetch_all_room_machines_uses_ttl_cache_for_same_room_and_category(self):
+        client = MagicMock()
+        client.position_device.return_value = {
+            'ok': True,
+            'data': [
+                {'categoryCode': '00', 'categoryName': 'Washer', 'total': 1, 'idleCount': 1},
+            ],
+        }
+        client.device_detail_page.return_value = {
+            'ok': True,
+            'data': {
+                'total': 1,
+                'items': [{'id': 'washer-1', 'name': 'Machine A'}],
+            },
+        }
+
+        self.app_module.room_machine_cache.clear()
+        first = self.app_module.fetch_all_room_machines(client, position_id='room-cache', category_code='00')
+        second = self.app_module.fetch_all_room_machines(client, position_id='room-cache', category_code='00')
+
+        self.assertTrue(first['ok'])
+        self.assertTrue(second['ok'])
+        client.position_device.assert_called_once()
+        client.device_detail_page.assert_called_once()
+
+    def test_find_scan_machine_statuses_reuses_same_room_lookup_for_multiple_favorites(self):
+        client = MagicMock()
+        client.goods_last_run_info.return_value = {'ok': False, 'error_type': 'business', 'msg': 'ignored'}
+        favorites = [
+            {
+                'label': 'Machine A',
+                'qrCode': 'QR-001',
+                'goodsId': 'goods-1',
+                'shopId': 'room-1',
+                'shopName': 'Room One',
+                'categoryCode': '00',
+            },
+            {
+                'label': 'Machine B',
+                'qrCode': 'QR-002',
+                'goodsId': 'goods-2',
+                'shopId': 'room-1',
+                'shopName': 'Room One',
+                'categoryCode': '00',
+            },
+        ]
+        machines_res = {
+            'ok': True,
+            'data': {
+                'items': [
+                    {
+                        'id': 'goods-1',
+                        'name': 'Machine A',
+                        'categoryCode': '00',
+                        'state': 1,
+                        'stateDesc': 'Idle',
+                        'enableReserve': True,
+                    },
+                    {
+                        'id': 'goods-2',
+                        'name': 'Machine B',
+                        'categoryCode': '00',
+                        'state': 2,
+                        'stateDesc': 'Running',
+                        'finishTime': '2026-03-29T08:15:00+08:00',
+                        'enableReserve': True,
+                    },
+                ],
+            },
+        }
+
+        with patch('app.fetch_all_room_machines', return_value=machines_res) as fetch_room_machines_mock:
+            result = self.app_module.find_scan_machine_statuses(client, favorites, lng=120.0, lat=30.0, force_refresh=True)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['items']), 2)
+        self.assertTrue(all(item['matched'] for item in result['items']))
+        self.assertEqual(fetch_room_machines_mock.call_count, 1)
+        self.assertEqual(
+            [item['machine']['goodsId'] for item in result['items']],
+            ['goods-1', 'goods-2'],
+        )
+
+    def test_find_scan_machine_statuses_uses_run_info_when_room_lookup_is_unavailable(self):
+        client = MagicMock()
+        client.goods_last_run_info.return_value = {
+            'ok': True,
+            'data': {
+                'workStatus': 10,
+                'deadTime': '2026-03-29 23:12:25',
+            },
+        }
+        favorites = [
+            {
+                'label': 'Machine A',
+                'qrCode': 'QR-001',
+                'goodsId': 'goods-1',
+                'shopId': 'room-1',
+                'shopName': 'Room One',
+                'categoryCode': '00',
+                'categoryName': 'Washer',
+            }
+        ]
+
+        mocked_now = datetime(2026, 3, 29, 14, 0, 0, tzinfo=timezone.utc).astimezone(self.app_module.REMOTE_MACHINE_TIMEZONE)
+        with patch('app.fetch_room_machines_for_favorites') as fetch_room_machines_mock, patch('app.machine_now', return_value=mocked_now):
+            result = self.app_module.find_scan_machine_statuses(client, favorites, lng=120.0, lat=30.0, force_refresh=True)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['items']), 1)
+        self.assertTrue(result['items'][0]['matched'])
+        self.assertEqual(result['items'][0]['machine']['statusLabel'], '运行中')
+        self.assertEqual(result['items'][0]['machine']['goodsId'], 'goods-1')
+        fetch_room_machines_mock.assert_not_called()
+
+    def test_find_scan_machine_statuses_uses_idle_run_info_when_room_lookup_is_unavailable(self):
+        client = MagicMock()
+        client.goods_last_run_info.return_value = {
+            'ok': True,
+            'data': {
+                'workStatus': 10,
+                'deadTime': '2026-03-29 21:12:25',
+            },
+        }
+        favorites = [
+            {
+                'label': 'Machine A',
+                'qrCode': 'QR-001',
+                'goodsId': 'goods-1',
+                'shopId': 'room-1',
+                'shopName': 'Room One',
+                'categoryCode': '00',
+                'categoryName': 'Washer',
+            }
+        ]
+
+        mocked_now = datetime(2026, 3, 29, 14, 0, 0, tzinfo=timezone.utc).astimezone(self.app_module.REMOTE_MACHINE_TIMEZONE)
+        with patch('app.fetch_room_machines_for_favorites') as fetch_room_machines_mock, patch('app.machine_now', return_value=mocked_now):
+            result = self.app_module.find_scan_machine_statuses(client, favorites, lng=120.0, lat=30.0, force_refresh=True)
+
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['items']), 1)
+        self.assertTrue(result['items'][0]['matched'])
+        self.assertEqual(result['items'][0]['machine']['statusLabel'], '空闲')
+        self.assertEqual(result['items'][0]['machine']['finishTimeText'], '')
+        self.assertEqual(result['items'][0]['machine']['goodsId'], 'goods-1')
+        fetch_room_machines_mock.assert_not_called()
+
+    def test_parse_datetime_value_treats_naive_machine_time_as_shanghai_time(self):
+        parsed = self.app_module.parse_datetime_value('2026-03-29 23:12:25')
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.utcoffset(), self.app_module.REMOTE_MACHINE_TIMEZONE.utcoffset(parsed))
+        self.assertEqual(parsed.hour, 23)
+        self.assertEqual(parsed.minute, 12)
+
+    def test_build_machine_status_marks_running_machine_idle_after_finish_time(self):
+        now = datetime(2026, 3, 29, 23, 30, 0, tzinfo=timezone.utc)
+        with patch('app.machine_now', return_value=now.astimezone(self.app_module.REMOTE_MACHINE_TIMEZONE)):
+            status = self.app_module.build_machine_status(
+                {
+                    'state': 10,
+                    'stateDesc': '',
+                    'finishTime': '2026-03-29 23:12:25',
+                    'enableReserve': True,
+                }
+            )
+
+        self.assertEqual(status['statusLabel'], '空闲')
+        self.assertEqual(status['statusDetail'], '空闲，可预约')
+        self.assertEqual(status['finishTimeText'], '')
+
     def test_merge_machine_with_run_info_promotes_running_status(self):
         client = MagicMock()
         client.goods_last_run_info.return_value = {
@@ -138,7 +343,9 @@ class ScanMachineStatusTests(unittest.TestCase):
             'enableReserve': True,
         }
 
-        result = self.app_module.merge_machine_with_run_info(client, machine)
+        mocked_now = datetime(2026, 3, 29, 0, 0, 0, tzinfo=timezone.utc).astimezone(self.app_module.REMOTE_MACHINE_TIMEZONE)
+        with patch('app.machine_now', return_value=mocked_now):
+            result = self.app_module.merge_machine_with_run_info(client, machine)
 
         self.assertEqual(result['statusLabel'], '运行中')
         self.assertEqual(result['finishTimeText'], '08:15')
