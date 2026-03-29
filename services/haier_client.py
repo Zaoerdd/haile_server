@@ -177,6 +177,27 @@ class HaierClient:
             }
         return result
 
+    def verify_goods_detail(self, goods_detail: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(goods_detail, dict) or not goods_detail:
+            return {
+                'ok': False,
+                'error_type': 'invalid_response',
+                'msg': '读取设备详情成功，但返回数据为空。',
+                'raw': goods_detail,
+            }
+
+        goods_id = str(goods_detail.get('id') or goods_detail.get('goodsId') or '').strip()
+        category_code = self.extract_category_code(goods_detail, default='')
+        if not goods_id or not category_code:
+            return {
+                'ok': False,
+                'error_type': 'invalid_response',
+                'msg': '无法解析当前设备的 goodsId 或类型。',
+                'raw': goods_detail,
+            }
+
+        return self.goods_verify(goods_id, category_code=category_code)
+
     @staticmethod
     def _coerce_positive_int(value: Any) -> int | None:
         if value in (None, ''):

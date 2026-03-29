@@ -1087,11 +1087,29 @@ class ReservationService:
         goods_detail_res = client.goods_details(str(goods_id))
         if not goods_detail_res.get('ok'):
             return False, goods_detail_res.get('msg') or '读取设备详情失败。', goods_detail_res.get('raw'), 'failed'
+        goods_detail = goods_detail_res.get('data') or {}
+        verify_res = client.verify_goods_detail(goods_detail)
+        verify_debug = {
+            'goodsId': str(goods_detail.get('id') or goods_detail.get('goodsId') or ''),
+            'categoryCode': HaierClient.extract_category_code(goods_detail, default=''),
+            'result': verify_res.get('raw'),
+        }
+        if not verify_res.get('ok'):
+            return (
+                False,
+                verify_res.get('msg') or '创单前设备校验失败。',
+                {
+                    'goodsDetail': goods_detail_res.get('raw'),
+                    'goodsVerify': verify_debug,
+                },
+                f"failed_{verify_res.get('error_type') or 'unknown'}",
+            )
+
         create_res = client.create_scan_order(
             goods_id=str(goods_id),
             mode_id=task.mode_id,
             hash_key=str(scan_data.get('activityHashKey') or ''),
-            goods_detail=goods_detail_res.get('data') or {},
+            goods_detail=goods_detail,
         )
         if not create_res.get('ok'):
             if create_res.get('error_type') == 'business':

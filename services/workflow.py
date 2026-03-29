@@ -950,6 +950,25 @@ class WorkflowManager:
         if not isinstance(goods_detail, dict) or not goods_detail:
             return self._error('invalid_response', '读取设备详情成功，但返回数据为空。', state, goods_detail_res.get('raw'))
 
+        verify_res = client.verify_goods_detail(goods_detail)
+        verify_debug = {
+            'goodsId': str(goods_detail.get('id') or goods_detail.get('goodsId') or ''),
+            'categoryCode': HaierClient.extract_category_code(goods_detail, default=''),
+            'result': verify_res.get('raw'),
+        }
+        if not verify_res.get('ok'):
+            return self._error(
+                verify_res.get('error_type', 'request_failed'),
+                verify_res.get('msg', '创单前设备校验失败。'),
+                state,
+                {
+                    'goodsDetail': goods_detail_res.get('raw'),
+                    'goodsVerify': verify_debug,
+                },
+                code=verify_res.get('code'),
+                data=verify_res.get('data'),
+            )
+
         res = client.create_order(
             state.context['goods_id'],
             state.mode_id,
@@ -968,6 +987,7 @@ class WorkflowManager:
             client,
             debug={
                 'goodsDetail': goods_detail_res.get('raw'),
+                'goodsVerify': verify_debug,
                 'createOrder': res.get('raw'),
             },
         )
