@@ -77,6 +77,30 @@ class MachineFavoritesStoreTests(unittest.TestCase):
         self.assertEqual(payload['version'], 2)
         self.assertEqual(payload['favorites'], favorites)
 
+    def test_save_machines_falls_back_to_direct_write_when_replace_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            machines_file = Path(temp_dir) / 'machines.json'
+            favorites = [
+                {
+                    'label': 'Machine A',
+                    'qrCode': 'QR-001',
+                    'goodsId': 'goods-1',
+                    'shopId': 'room-1',
+                    'shopName': 'Room One',
+                    'categoryCode': '00',
+                    'categoryName': 'Washer',
+                    'addedAt': '2026-03-29T12:00:00+08:00',
+                }
+            ]
+            with patch.object(config, 'MACHINES_FILE', machines_file), \
+                patch('pathlib.Path.replace', side_effect=OSError('Invalid cross-device link')):
+                saved = config.save_machines(favorites)
+                payload = json.loads(machines_file.read_text(encoding='utf-8'))
+
+        self.assertEqual(saved, favorites)
+        self.assertEqual(payload['version'], 2)
+        self.assertEqual(payload['favorites'], favorites)
+
 
 if __name__ == '__main__':
     unittest.main()

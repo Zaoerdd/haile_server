@@ -1332,6 +1332,8 @@ def add_favorite_machine():
         favorites = upsert_scan_machine(data)
     except ValueError as exc:
         return json_error(str(exc), error_type='invalid_favorite')
+    except OSError as exc:
+        return json_error(f'收藏写入失败：{exc}', error_type='favorite_store_write_failed', status_code=500)
     return jsonify(
         {
             'status': 'success',
@@ -1348,6 +1350,8 @@ def delete_favorite_machine(qr_code: str):
         favorites = remove_scan_machine(qr_code)
     except ValueError as exc:
         return json_error(str(exc), error_type='invalid_favorite')
+    except OSError as exc:
+        return json_error(f'收藏写入失败：{exc}', error_type='favorite_store_write_failed', status_code=500)
     return jsonify(
         {
             'status': 'success',

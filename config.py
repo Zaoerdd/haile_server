@@ -144,9 +144,17 @@ def load_machines() -> list[dict[str, str]]:
 def save_machines(favorites: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
     normalized = normalize_machine_store(_machine_store_payload(favorites or []))
     payload = _machine_store_payload(normalized)
+    payload_text = f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
     temp_file = MACHINES_FILE.with_name(f'{MACHINES_FILE.name}.tmp')
-    temp_file.write_text(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n", encoding='utf-8')
-    temp_file.replace(MACHINES_FILE)
+    try:
+        temp_file.write_text(payload_text, encoding='utf-8')
+        temp_file.replace(MACHINES_FILE)
+    except OSError:
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        MACHINES_FILE.write_text(payload_text, encoding='utf-8')
     return normalized
 
 
