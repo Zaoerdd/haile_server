@@ -1033,6 +1033,24 @@ label > select {
     min-width: 88px;
 }
 
+.reservation-composer-panel {
+    width: min(100%, 520px);
+    max-height: min(82vh, 860px);
+    overflow: auto;
+}
+
+.reservation-composer-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.reservation-composer-toolbar h3 {
+    margin: 0;
+}
+
 .wash-machine-modal {
     position: fixed;
     inset: 0;

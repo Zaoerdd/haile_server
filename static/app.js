@@ -61,6 +61,7 @@ const state = {
         items: [],
         roomMachines: [],
         modeOptions: [],
+        composerOpen: false,
     },
     orders: {
         items: [],
@@ -207,6 +208,8 @@ function bindElements() {
 
     el.washView = document.getElementById('washView');
 
+    el.reservationTab = document.getElementById('reservationTab');
+    el.reservationComposer = document.getElementById('reservationComposer');
     el.reservationForm = document.getElementById('reservationForm');
     el.reservationSource = document.getElementById('reservationSource');
     el.reservationScanWrap = document.getElementById('reservationScanWrap');
@@ -250,7 +253,7 @@ function bindEvents() {
 
     el.washView.addEventListener('click', handleWashClick);
     el.washView.addEventListener('keydown', handleClickableCardKeydown);
-    el.reservationList.addEventListener('click', handleReservationClick);
+    el.reservationTab.addEventListener('click', handleReservationClick);
     el.ordersList.addEventListener('click', handleOrderClick);
     el.ordersList.addEventListener('keydown', handleClickableCardKeydown);
     el.settingsForm.addEventListener('submit', handleSettingsSubmit);
@@ -474,11 +477,18 @@ function restoreSelectValue(id, value) {
 
 async function refreshWashCurrentView(reason = 'manual') {
     const currentView = state.wash.view || 'home';
-    if ((currentView === 'room' || currentView === 'machine') && state.wash.roomId) {
+    if ((currentView === 'room' || currentView === 'machine') && (state.wash.roomId || state.wash.machineId)) {
         const selectedMode = getSelectedValue('washModeSelect');
-        state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
+        if (state.wash.roomId) {
+            state.wash.roomData = await getRoomMachines(state.wash.roomId, { forceRefresh: true });
+        }
         if (state.wash.machineId) {
             state.wash.machineDetail = await getMachineDetail(state.wash.machineId, { forceRefresh: true });
+            const machineRoomId = String((state.wash.machineDetail || {}).shopId || '').trim();
+            if (!state.wash.roomId && machineRoomId) {
+                state.wash.roomId = machineRoomId;
+                state.wash.roomData = await getRoomMachines(machineRoomId, { forceRefresh: true });
+            }
         }
         if (currentView === 'machine') {
             state.wash.view = 'room';
@@ -727,6 +737,7 @@ function switchTab(tabId, options = {}) {
     }
 
     if (safeTab !== 'reservationTab') {
+        setReservationComposerOpen(false);
         clearReservationAutoRefresh();
     }
 
@@ -781,6 +792,7 @@ function resetTabToRoot(tabId) {
         return;
     }
     if (tabId === 'reservationTab') {
+        setReservationComposerOpen(false);
         renderReservations();
         return;
     }
@@ -931,6 +943,20 @@ function showAlertDialog(message, title = '提示') {
 
 function showConfirmDialog(message, title = '请确认') {
     return openAppDialog({ title, message, confirmText: '确定', cancelText: '取消', showCancel: true });
+}
+
+function updateReservationComposerVisibility() {
+    if (!el.reservationComposer) {
+        return;
+    }
+    const open = Boolean(state.reservations.composerOpen);
+    el.reservationComposer.classList.toggle('hidden', !open);
+    el.reservationComposer.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function setReservationComposerOpen(open) {
+    state.reservations.composerOpen = Boolean(open);
+    updateReservationComposerVisibility();
 }
 
 function getFavoriteMachinesFromPayload(data) {
@@ -1749,11 +1775,12 @@ function renderWashMachineView() {
                     选择模式
                     ${renderSelect('washModeSelect', modeOptions, '请选择模式')}
                 </label>
-                <div class="spacer-sm"></div>
-                <div class="action-row">
-                    <button class="btn btn-secondary" type="button" data-action="create-lock-order">线上下单（到创建订单）</button>
-                    ${machine.supportsVirtualScan && machine.scanCode ? '<button class="btn btn-primary" type="button" data-action="open-machine-scan">扫码下单（手动流程）</button>' : ''}
-                </div>
+                ${machine.supportsVirtualScan && machine.scanCode ? `
+                    <div class="spacer-sm"></div>
+                    <div class="action-row">
+                        <button class="btn btn-primary" type="button" data-action="open-machine-scan">扫码下单（手动流程）</button>
+                    </div>
+                ` : ''}
                 ${renderWashResult()}
             </section>
         </div>
@@ -1908,12 +1935,24 @@ function renderWashResult() {
 function renderReservations() {
     if (state.bootstrap.reservationsLoading) {
         el.reservationList.innerHTML = `<div class="panel-card loading-card">正在加载预约和调度器状态...</div>`;
+        updateReservationComposerVisibility();
         return;
     }
 
     const items = state.reservations.items || [];
     const scheduler = state.scheduler || {};
     el.reservationList.innerHTML = `
+        <section class="panel-card">
+            <div class="compact-summary">
+                <div class="compact-main">
+                    <h3>新建预约</h3>
+                    <p>收藏机器和洗衣房机器都可以在弹层里创建预约。</p>
+                </div>
+                <div class="compact-summary-side">
+                    <button class="btn btn-primary" type="button" data-action="open-reservation-composer">新建预约</button>
+                </div>
+            </div>
+        </section>
         <section class="panel-card">
             <div class="compact-summary">
                 <div class="compact-main">
@@ -1948,6 +1987,7 @@ function renderReservations() {
             ${scheduler.lastError ? `<div class="spacer-sm"></div><div class="callout danger">${escapeHtml(scheduler.lastError)}</div>` : ''}
         </section>
     `;
+    updateReservationComposerVisibility();
 }
 
 function renderOrders() {
@@ -2086,6 +2126,7 @@ function renderRoomCard(room) {
 function renderScanMachineCard(machine) {
     const linkedStatus = machine.linkedStatus || null;
     const linkedMachine = linkedStatus && linkedStatus.matched ? linkedStatus.machine || null : null;
+    const linkedRoom = linkedStatus && linkedStatus.matched ? linkedStatus.room || null : null;
     const statusChipClass = linkedMachine ? machineChipClass(linkedMachine) : 'pending';
     const statusChipText = linkedMachine
         ? (linkedMachine.statusLabel || linkedMachine.stateDesc || '未知')
@@ -2093,6 +2134,8 @@ function renderScanMachineCard(machine) {
     const timeChipText = linkedMachine
         ? machineAvailabilityText(linkedMachine)
         : (linkedStatus ? '暂无时间' : '计算中');
+    const goodsId = linkedMachine && linkedMachine.goodsId ? linkedMachine.goodsId : (machine.goodsId || '');
+    const roomId = linkedRoom && linkedRoom.id ? linkedRoom.id : (machine.shopId || '');
     return `
         <article
             class="list-card row-card clickable-card"
@@ -2101,7 +2144,9 @@ function renderScanMachineCard(machine) {
             data-clickable-card="true"
             data-action="open-scan"
             data-qr-code="${escapeHtml(machine.qrCode)}"
-            aria-label="进入${escapeHtml(machine.label || '收藏设备')}流程"
+            data-goods-id="${escapeHtml(goodsId)}"
+            data-room-id="${escapeHtml(roomId)}"
+            aria-label="查看${escapeHtml(machine.label || '收藏设备')}详情"
         >
             <div class="row-card-main">
                 <div class="row-card-head">
@@ -2499,6 +2544,24 @@ async function handleWashClick(event) {
             return;
         }
         if (action === 'open-scan') {
+            const goodsId = String(button.dataset.goodsId || '').trim();
+            const roomId = String(button.dataset.roomId || '').trim();
+            if (goodsId) {
+                await openMachine(goodsId, { roomId: roomId || null });
+                return;
+            }
+            const qrCode = String(button.dataset.qrCode || '').trim();
+            if (qrCode) {
+                const linkedStatus = await getScanMachineStatus(qrCode, { forceRefresh: true });
+                const linkedMachine = linkedStatus && linkedStatus.matched ? linkedStatus.machine || null : null;
+                const linkedRoom = linkedStatus && linkedStatus.matched ? linkedStatus.room || null : null;
+                const linkedGoodsId = String((linkedMachine || {}).goodsId || '').trim();
+                const linkedRoomId = String((linkedRoom || {}).id || '').trim();
+                if (linkedGoodsId) {
+                    await openMachine(linkedGoodsId, { roomId: linkedRoomId || null });
+                    return;
+                }
+            }
             await openScanMachine(button.dataset.qrCode);
             return;
         }
@@ -2562,7 +2625,7 @@ async function openMachine(goodsId, options = {}) {
     state.wash.loading = true;
     renderWashLoading('正在加载设备详情...');
     try {
-        const targetRoomId = options.roomId || state.wash.roomId || '';
+        let targetRoomId = String(options.roomId || state.wash.roomId || '').trim();
         if (targetRoomId && (!state.wash.roomData || state.wash.roomId !== targetRoomId)) {
             state.wash.roomData = await getRoomMachines(targetRoomId);
             state.wash.roomId = targetRoomId;
@@ -2571,6 +2634,20 @@ async function openMachine(goodsId, options = {}) {
             state.wash.roomCategoryCode = String(options.roomCategoryCode || '');
         }
         state.wash.machineDetail = await getMachineDetail(goodsId);
+        const detailRoomId = String((state.wash.machineDetail || {}).shopId || '').trim();
+        if (!targetRoomId && detailRoomId) {
+            targetRoomId = detailRoomId;
+        }
+        if (targetRoomId) {
+            if (!state.wash.roomData || state.wash.roomId !== targetRoomId) {
+                state.wash.roomData = await getRoomMachines(targetRoomId);
+            }
+            state.wash.roomId = targetRoomId;
+        } else {
+            state.wash.roomId = null;
+            state.wash.roomData = null;
+            state.wash.roomCategoryCode = '';
+        }
         state.wash.view = 'room';
         state.wash.machineId = goodsId;
         state.wash.scanMachine = null;
@@ -2854,6 +2931,7 @@ async function handleReservationSubmit(event) {
     const data = await apiPost('/api/reservations', payload);
     showToastMessage(data.msg || '预约任务已创建。');
     el.reservationTitle.value = '';
+    setReservationComposerOpen(false);
     await loadReservations();
 }
 
@@ -2864,6 +2942,17 @@ async function handleReservationClick(event) {
     }
 
     const action = button.dataset.action;
+    if (action === 'open-reservation-composer') {
+        if (!ensureTokenReady()) {
+            return;
+        }
+        setReservationComposerOpen(true);
+        return;
+    }
+    if (action === 'close-reservation-composer') {
+        setReservationComposerOpen(false);
+        return;
+    }
     if (action === 'continue-reservation-process') {
         if (!ensureTokenReady()) {
             return;

@@ -25,80 +25,86 @@
             </section>
 
             <section id="reservationTab" class="tab-panel">
-                <div class="panel-card">
-                    <h3>新建预约</h3>
-                    <form id="reservationForm" class="form-grid">
-                        <label>
-                            设备来源
-                            <select id="reservationSource">
-                                <option value="scan">收藏机器</option>
-                                <option value="room">洗衣房机器</option>
-                            </select>
-                        </label>
+                <div id="reservationComposer" class="app-dialog hidden" aria-hidden="true">
+                    <button class="app-dialog-backdrop" type="button" data-action="close-reservation-composer" aria-label="关闭新建预约"></button>
+                    <div class="app-dialog-panel reservation-composer-panel" role="dialog" aria-modal="true" aria-labelledby="reservationComposerTitle">
+                        <div class="reservation-composer-toolbar">
+                            <h3 id="reservationComposerTitle">新建预约</h3>
+                            <button class="btn btn-light" type="button" data-action="close-reservation-composer">关闭</button>
+                        </div>
+                        <form id="reservationForm" class="form-grid">
+                            <label>
+                                设备来源
+                                <select id="reservationSource">
+                                    <option value="scan">收藏机器</option>
+                                    <option value="room">洗衣房机器</option>
+                                </select>
+                            </label>
 
-                        <label id="reservationScanWrap">
-                            收藏机器
-                            <select id="reservationScanMachine"></select>
-                        </label>
+                            <label id="reservationScanWrap">
+                                收藏机器
+                                <select id="reservationScanMachine"></select>
+                            </label>
 
-                        <label id="reservationRoomWrap" class="hidden">
-                            洗衣房
-                            <select id="reservationRoom"></select>
-                        </label>
+                            <label id="reservationRoomWrap" class="hidden">
+                                洗衣房
+                                <select id="reservationRoom"></select>
+                            </label>
 
-                        <label id="reservationMachineWrap" class="hidden">
-                            洗衣机
-                            <select id="reservationMachine"></select>
-                        </label>
+                            <label id="reservationMachineWrap" class="hidden">
+                                洗衣机
+                                <select id="reservationMachine"></select>
+                            </label>
 
-                        <label>
-                            模式
-                            <select id="reservationMode"></select>
-                        </label>
+                            <label>
+                                模式
+                                <select id="reservationMode"></select>
+                            </label>
 
-                        <label>
-                            预约类型
-                            <select id="reservationScheduleType">
-                                <option value="once">单次</option>
-                                <option value="weekly">每周固定时间</option>
-                            </select>
-                        </label>
+                            <label>
+                                预约类型
+                                <select id="reservationScheduleType">
+                                    <option value="once">单次</option>
+                                    <option value="weekly">每周固定时间</option>
+                                </select>
+                            </label>
 
-                        <label id="reservationTargetWrap">
-                            目标时间
-                            <input type="datetime-local" id="reservationTargetTime">
-                        </label>
+                            <label id="reservationTargetWrap">
+                                目标时间
+                                <input type="datetime-local" id="reservationTargetTime">
+                            </label>
 
-                        <label id="reservationWeekdayWrap" class="hidden">
-                            每周星期
-                            <select id="reservationWeekday">
-                                <option value="0">周一</option>
-                                <option value="1">周二</option>
-                                <option value="2">周三</option>
-                                <option value="3">周四</option>
-                                <option value="4">周五</option>
-                                <option value="5">周六</option>
-                                <option value="6">周日</option>
-                            </select>
-                        </label>
+                            <label id="reservationWeekdayWrap" class="hidden">
+                                每周星期
+                                <select id="reservationWeekday">
+                                    <option value="0">周一</option>
+                                    <option value="1">周二</option>
+                                    <option value="2">周三</option>
+                                    <option value="3">周四</option>
+                                    <option value="4">周五</option>
+                                    <option value="5">周六</option>
+                                    <option value="6">周日</option>
+                                </select>
+                            </label>
 
-                        <label id="reservationWeeklyTimeWrap" class="hidden">
-                            每周时间
-                            <input type="time" id="reservationWeeklyTime">
-                        </label>
+                            <label id="reservationWeeklyTimeWrap" class="hidden">
+                                每周时间
+                                <input type="time" id="reservationWeeklyTime">
+                            </label>
 
-                        <label>
-                            提前建单分钟数
-                            <input type="number" id="reservationLeadMinutes" min="1" step="1">
-                        </label>
+                            <label>
+                                提前建单分钟数
+                                <input type="number" id="reservationLeadMinutes" min="1" step="1">
+                            </label>
 
-                        <label>
-                            标题
-                            <input type="text" id="reservationTitle" placeholder="不填则自动生成">
-                        </label>
+                            <label>
+                                标题
+                                <input type="text" id="reservationTitle" placeholder="不填则自动生成">
+                            </label>
 
-                        <button type="submit" class="btn btn-primary full-width">创建预约任务</button>
-                    </form>
+                            <button type="submit" class="btn btn-primary full-width">创建预约任务</button>
+                        </form>
+                    </div>
                 </div>
 
                 <div id="reservationList" class="stack"></div>
