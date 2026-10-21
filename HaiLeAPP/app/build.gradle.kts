@@ -1,6 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
 }
+
+val localProps = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+val haileAuthUser = localProps.getProperty("haile.auth.user", "")
+val haileAuthPass = localProps.getProperty("haile.auth.pass", "")
 
 android {
     namespace = "com.example.haile"
@@ -18,6 +29,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "HAILE_AUTH_USER", "\"$haileAuthUser\"")
+        buildConfigField("String", "HAILE_AUTH_PASS", "\"$haileAuthPass\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

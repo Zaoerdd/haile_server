@@ -96,7 +96,8 @@ public class MainActivity extends AppCompatActivity {
         myWebView.setWebViewClient(new WebViewClient() {
             @Override
             public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler, String host, String realm) {
-                handler.proceed("admin", "haile");
+                // 凭据来自 local.properties（已被 gitignore），构建时注入 BuildConfig
+                handler.proceed(BuildConfig.HAILE_AUTH_USER, BuildConfig.HAILE_AUTH_PASS);
             }
 
             @Override
