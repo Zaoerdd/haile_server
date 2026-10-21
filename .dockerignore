@@ -19,3 +19,4 @@ env/
 .mypy_cache/
 .DS_Store
 README.txt
+machines.json

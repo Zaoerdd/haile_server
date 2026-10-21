@@ -101,6 +101,23 @@ class MachineFavoritesStoreTests(unittest.TestCase):
         self.assertEqual(payload['version'], 2)
         self.assertEqual(payload['favorites'], favorites)
 
+    def test_load_machines_tolerates_missing_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            machines_file = Path(temp_dir) / 'machines.json'
+            with patch.object(config, 'MACHINES_FILE', machines_file):
+                favorites = config.load_machines()
+
+        self.assertEqual(favorites, [])
+
+    def test_load_machines_tolerates_mounted_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            machines_file = Path(temp_dir) / 'machines.json'
+            machines_file.mkdir()
+            with patch.object(config, 'MACHINES_FILE', machines_file):
+                favorites = config.load_machines()
+
+        self.assertEqual(favorites, [])
+
 
 if __name__ == '__main__':
     unittest.main()

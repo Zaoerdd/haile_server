@@ -27,7 +27,9 @@ services:
       GUNICORN_THREADS: "2"
       GUNICORN_TIMEOUT: "60"
     volumes:
-      - ./haile_server/machines.json:/app/machines.json:ro
+      # machines.json 是运行时数据（页面收藏会写入），必须可写；
+      # 首次部署先 cp machines.example.json machines.json，否则 Docker 会把该路径建成目录
+      - ./haile_server/machines.json:/app/machines.json
       - ./haile_server/haile_server.db:/app/haile_server.db
     networks:
       - backend

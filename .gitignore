@@ -30,3 +30,6 @@ Thumbs.db
 
 # 其他
 haier_api_package/
+# --- 运行时数据：用户收藏的机组（每台部署机不同，不入库）---
+# 模板见 machines.example.json；实际文件由页面「收藏」写入
+machines.json

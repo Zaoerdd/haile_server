@@ -133,7 +133,7 @@ def normalize_machine_store(data: Any) -> list[dict[str, str]]:
 
 
 def load_machines() -> list[dict[str, str]]:
-    if not MACHINES_FILE.exists():
+    if not MACHINES_FILE.is_file():
         return []
 
     with MACHINES_FILE.open('r', encoding='utf-8') as f:

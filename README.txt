@@ -12,3 +12,4 @@
 - 页面不再需要手动输入 Token，服务端会从 `.env` 读取 `HAILE_TOKEN`
 - 如果 `HAILE_TOKEN` 缺失、无效或暂时无法校验，页面会弹出提醒并禁用核心操作按钮
 - 修改 `.env` 后刷新页面即可重新校验最新的 `HAILE_TOKEN`
+- `machines.json` 是运行时数据（收藏的机组），已在 .gitignore 中；首次运行先 `cp machines.example.json machines.json`
