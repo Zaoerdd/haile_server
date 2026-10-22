@@ -14,7 +14,8 @@ from services.settings_store import settings_store
 
 
 # 订单进入这些状态说明机器已经真的开始工作
-RUNNING_KEYWORDS = ('运行', '洗涤中', '脱水中', '烘干中', '已启动', '使用中', '预计')
+# 注意：洗衣机实际返回的是「洗衣中」，不是「洗涤中」；两者都要覆盖
+RUNNING_KEYWORDS = ('运行', '洗衣中', '洗涤中', '洗中', '脱水中', '烘干中', '已启动', '使用中', '预计')
 # 这些状态说明订单还没真正开始（待付款 / 待确认等）
 PENDING_KEYWORDS = ('待付款', '待支付', '待确认', '待验证', '待放衣', '待启动')
 # 这些状态说明订单已经结束
@@ -190,6 +191,10 @@ class OrderWatchService:
 
             remaining = (finish - now).total_seconds()
             if remaining <= 0:
+                if not flags['start_notified']:
+                    # 从未开始洗的订单（例如待付款后取消），不推「结束」避免误导
+                    self._mark(order_no, 'finished_notified')
+                    continue
                 result = self._notify(
                     '洗衣已结束',
                     [f'机器：{machine or "未知"}', f'订单：{order_no}', f'结束时间：{format_time(finish)}'],
@@ -237,6 +242,11 @@ class OrderWatchService:
                 should_finish = (now - missing_since) >= MISSING_GRACE
 
             if not should_finish:
+                continue
+
+            if not int(row['start_notified'] or 0):
+                # 只是待付款订单被取消，静默归档
+                self._mark(order_no, 'finished_notified')
                 continue
 
             machine = str(row['machine_name'] or '未知')

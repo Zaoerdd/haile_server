@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +21,61 @@ STEP_LABELS = {
     5: '支付启动',
     6: '已完成',
 }
+
+# 手工流程内部的小缓存：避免同一台机器在一次下单里重复请求
+SCAN_SNAPSHOT_TTL_SECONDS = float(os.getenv('SCAN_SNAPSHOT_TTL_SECONDS', '15'))
+GOODS_DETAIL_CACHE_TTL_SECONDS = float(os.getenv('GOODS_DETAIL_CACHE_SECONDS', '60'))
+
+_SCAN_SNAPSHOT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_GOODS_DETAIL_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _remember_scan_snapshot(qr_code: str, data: Dict[str, Any]) -> None:
+    key = str(qr_code or '').strip()
+    if not key or not isinstance(data, dict) or not data.get('goodsId'):
+        return
+    with _CACHE_LOCK:
+        _SCAN_SNAPSHOT_CACHE[key] = (time.time() + SCAN_SNAPSHOT_TTL_SECONDS, dict(data))
+
+
+def _recall_scan_snapshot(qr_code: str) -> Optional[Dict[str, Any]]:
+    key = str(qr_code or '').strip()
+    if not key:
+        return None
+    with _CACHE_LOCK:
+        item = _SCAN_SNAPSHOT_CACHE.get(key)
+        if not item:
+            return None
+        expires_at, data = item
+        if expires_at < time.time():
+            _SCAN_SNAPSHOT_CACHE.pop(key, None)
+            return None
+        return dict(data)
+
+
+def _remember_goods_detail(goods_id: str, data: Dict[str, Any]) -> None:
+    key = str(goods_id or '').strip()
+    if not key or not isinstance(data, dict) or not data:
+        return
+    with _CACHE_LOCK:
+        _GOODS_DETAIL_CACHE[key] = (time.time() + GOODS_DETAIL_CACHE_TTL_SECONDS, dict(data))
+
+
+def _recall_goods_detail(goods_id: str) -> Optional[Dict[str, Any]]:
+    key = str(goods_id or '').strip()
+    if not key:
+        return None
+    with _CACHE_LOCK:
+        item = _GOODS_DETAIL_CACHE.get(key)
+        if not item:
+            return None
+        expires_at, data = item
+        if expires_at < time.time():
+            _GOODS_DETAIL_CACHE.pop(key, None)
+            return None
+        return dict(data)
+
 
 MANUAL_SCAN_FLOW_TYPE = 'scan_manual'
 ATTACHED_SCAN_FLOW_TYPE = 'scan_attached'
@@ -169,6 +227,11 @@ class WorkflowManager:
         cleanup_result = self.cleanup_machine_orders(token=token, qr_code=qr_code)
         if cleanup_result.get('status') != 'success':
             return cleanup_result
+
+        # 清理阶段已经扫描过这台机器，把结果留给步骤1复用，省一次上游请求
+        scan_data = cleanup_result.get('scanData')
+        if isinstance(scan_data, dict):
+            _remember_scan_snapshot(qr_code, scan_data)
 
         state = ProcessState(
             process_id=uuid.uuid4().hex,
@@ -733,6 +796,7 @@ class WorkflowManager:
         return {
             'status': 'success',
             'msg': message,
+            'scanData': scan_data,
             'matchedOrders': matched_orders,
             'cleanedOrders': cleaned_orders,
             'blockedOrders': blocked_orders,
@@ -1001,7 +1065,9 @@ class WorkflowManager:
         if not detail_res.get('ok'):
             return self._error_result(detail_res, state)
 
-        detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
+        # 建单后订单必然是「待付款但未最终确认」，要变最终待付款必须先 placeClothes（步骤3）。
+        # 这里轮询等一个此刻不可能出现的状态纯属空转，实测一次点击会多打 4 次 detail。
+        detail = detail_res.get('data') or {}
         debug_payload['settledDetail'] = detail
         classification = self._classify_order_detail(detail)
         self._hydrate_context_from_detail(state, detail)
@@ -1158,6 +1224,17 @@ class WorkflowManager:
         }
 
     def _step_scan(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
+        cached = _recall_scan_snapshot(state.qr_code)
+        if cached and cached.get('goodsId'):
+            state.context['goods_id'] = str(cached.get('goodsId') or '')
+            state.context['hash_key'] = str(cached.get('activityHashKey') or '')
+            state.current_step = 2
+            return self._success(
+                state,
+                '步骤 1 完成：已解析机器并取得临时参数。',
+                {'source': 'cleanup_scan_reused', 'scan': cached},
+            )
+
         res = client.scan_goods(state.qr_code)
         if not res.get('ok'):
             return self._error_result(res, state)
@@ -1171,7 +1248,7 @@ class WorkflowManager:
         return self._success(state, '步骤 1 完成：已解析机器并取得临时参数。', res.get('raw'))
 
     def _step_create_order(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
-        goods_detail_res = client.goods_details(str(state.context['goods_id']))
+        goods_detail_res = self._load_goods_detail(client, str(state.context['goods_id']))
         if not goods_detail_res.get('ok'):
             return self._error_result(goods_detail_res, state)
 
@@ -1220,6 +1297,17 @@ class WorkflowManager:
                 'createOrder': res.get('raw'),
             },
         )
+
+    def _load_goods_detail(self, client: HaierClient, goods_id: str) -> Dict[str, Any]:
+        cached = _recall_goods_detail(goods_id)
+        if cached:
+            return {'ok': True, 'data': cached, 'raw': {'source': 'goods_detail_cache', 'goodsId': goods_id}}
+        res = client.goods_details(goods_id)
+        if res.get('ok'):
+            data = res.get('data') or {}
+            if isinstance(data, dict) and data:
+                _remember_goods_detail(goods_id, data)
+        return res
 
     def _step_place_clothes(self, state: ProcessState, client: HaierClient) -> Dict[str, Any]:
         return self._advance_to_payment_stage(
