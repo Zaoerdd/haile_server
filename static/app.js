@@ -1922,7 +1922,7 @@ function renderWashScanView() {
             </label>
             <div class="spacer-sm"></div>
             <div class="action-row">
-                <button class="btn btn-primary" type="button" data-action="start-scan-process">开始手动流程</button>
+                <button class="btn btn-primary" type="button" data-action="start-scan-process">扫码下单（进入待付款）</button>
             </div>
         </section>
         ${renderWashResult()}
@@ -1938,6 +1938,8 @@ function renderWashProcessView() {
     const currentStep = Number(process.currentStep || 1);
     const displayStep = displayProcessStepId(currentStep) || 1;
     const displayStepLabel = processDisplayStepLabel(process);
+    const isPayStep = displayStep === 2 && !process.completed && !process.terminated;
+    const nextButtonLabel = isPayStep ? '付款' : `下一步：${displayStepLabel || '继续'}`;
     const order = process.order || null;
     const orderNo = process.orderNo || ((process.contextSummary || {}).orderNo) || '';
     const stepList = PROCESS_STEPS.map(step => {
@@ -1998,8 +2000,15 @@ function renderWashProcessView() {
             <div class="spacer-sm"></div>
             <div class="process-step-list">${stepList}</div>
             <div class="spacer-sm"></div>
+            ${isPayStep ? `
+                <div class="callout warning">
+                    <strong>订单已进入待付款</strong>
+                    <p class="body-text">点击「付款」将直接完成支付并启动设备。</p>
+                </div>
+                <div class="spacer-sm"></div>
+            ` : ''}
             <div class="action-row">
-                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">下一步：${escapeHtml(displayStepLabel || '继续')}</button>` : ''}
+                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">${escapeHtml(nextButtonLabel)}</button>` : ''}
                 <button class="btn btn-light" type="button" data-action="goto-orders">去订单页继续</button>
                 <button class="btn btn-danger" type="button" data-action="reset-process">放弃流程</button>
             </div>
@@ -2970,10 +2979,31 @@ async function startScanProcess(options = {}) {
         return;
     }
 
+    renderWashLoading('正在创建订单并确认放衣…');
     const data = await apiPost('/api/process/start', { qrCode, modeId });
-    showToastMessage(data.msg || '流程已创建。');
+    const processId = (data.process || {}).processId;
     state.wash.result = null;
-    await openProcess((data.process || {}).processId);
+    if (!processId) {
+        showToastMessage(data.msg || '流程已创建。');
+        return;
+    }
+
+    // 创建流程后立刻推进到待付款，用户只需再点「付款」
+    try {
+        const nextData = await apiPost('/api/process/next', { processId });
+        await openProcess(processId);
+        await loadActiveProcesses();
+        refreshOrdersOverview(true, { silent: true, preserveItems: true });
+        showToastMessage(normalizeProcessToastMessage(nextData.msg));
+    } catch (error) {
+        try {
+            await openProcess(processId);
+            await loadActiveProcesses();
+        } catch (refreshError) {
+            handleRequestError(refreshError, '刷新流程状态失败。', true);
+        }
+        throw error;
+    }
 }
 
 async function advanceProcess() {
