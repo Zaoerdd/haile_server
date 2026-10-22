@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict
 
-from config import DEFAULT_LEAD_MINUTES, SCHEDULER_INTERVAL_SECONDS, get_haile_token, get_pushplus_url
+from config import DEFAULT_LEAD_MINUTES, SCHEDULER_INTERVAL_SECONDS, get_haile_token, get_pushplus_target
 from services.db import database
 from services.haier_client import HaierClient
 
@@ -57,7 +57,7 @@ class SettingsStore:
     def _env_defaults(self) -> Dict[str, Any]:
         return {
             'token': get_haile_token(),
-            'pushplus_url': get_pushplus_url(),
+            'pushplus_url': get_pushplus_target(),
             'default_lead_minutes': DEFAULT_LEAD_MINUTES,
             'reservation_poll_interval_seconds': SCHEDULER_INTERVAL_SECONDS,
         }

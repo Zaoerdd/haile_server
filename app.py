@@ -14,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from config import ALLOW_REMOTE, BASE_PATH, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines, normalize_base_path, save_machines
 from services.haier_client import HaierClient
 from services.reservation_service import reservation_service
+from services.order_watch import order_watch_scheduler
 from services.scheduler import reservation_scheduler
 from services.settings_store import settings_store
 from services.workflow import WorkflowManager
@@ -27,6 +28,7 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1, x_proto=1, x_prefix=1)
 workflow_manager = WorkflowManager()
 reservation_scheduler.update_interval(settings_store.get_effective_settings().reservation_poll_interval_seconds)
 reservation_scheduler.start()
+order_watch_scheduler.start()
 
 ROOM_MACHINE_CACHE_TTL_SECONDS = 20
 FAVORITE_STATUS_CACHE_TTL_SECONDS = 12
@@ -1144,6 +1146,7 @@ def get_settings():
             'settings': settings.to_dict(),
             'tokenStatus': settings_store.validate_token(),
             'scheduler': reservation_scheduler.snapshot(),
+            'orderWatch': order_watch_scheduler.snapshot(),
         }
     )
 
@@ -1163,6 +1166,7 @@ def update_settings():
             'settings': settings.to_dict(),
             'tokenStatus': settings_store.validate_token(settings.token),
             'scheduler': reservation_scheduler.snapshot(),
+            'orderWatch': order_watch_scheduler.snapshot(),
         }
     )
 

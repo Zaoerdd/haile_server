@@ -100,6 +100,22 @@ class Database:
 
         CREATE INDEX IF NOT EXISTS idx_workflow_processes_active
         ON workflow_processes(completed, terminated, order_no, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS order_watch (
+            order_no TEXT PRIMARY KEY,
+            machine_name TEXT,
+            state_desc TEXT,
+            finish_time TEXT,
+            start_notified INTEGER NOT NULL DEFAULT 0,
+            ending_notified INTEGER NOT NULL DEFAULT 0,
+            finished_notified INTEGER NOT NULL DEFAULT 0,
+            missing_since TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_order_watch_open
+        ON order_watch(finished_notified, updated_at DESC);
         """
         with self._lock:
             with self.connect() as connection:

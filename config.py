@@ -70,6 +70,10 @@ DEFAULT_LNG = float(os.getenv('DEFAULT_LNG', '113.999622'))
 DEFAULT_LAT = float(os.getenv('DEFAULT_LAT', '22.596488'))
 BASE_PATH = normalize_base_path(os.getenv('BASE_PATH', ''))
 BASE_URL = 'https://yshz-user.haier-ioc.com'
+PUSHPLUS_API_URL = os.getenv('PUSHPLUS_API_URL', 'https://www.pushplus.plus/send')
+PUSHPLUS_TIMEOUT = float(os.getenv('PUSHPLUS_TIMEOUT', '8'))
+PUSHPLUS_ENDING_REMIND_MINUTES = int(os.getenv('PUSHPLUS_ENDING_REMIND_MINUTES', '5'))
+ORDER_WATCH_INTERVAL_SECONDS = int(os.getenv('ORDER_WATCH_INTERVAL_SECONDS', '30'))
 
 if not SSL_VERIFY:
     import urllib3
@@ -166,3 +170,13 @@ def get_haile_token() -> str:
 def get_pushplus_url() -> str:
     load_env_file()
     return os.getenv('PUSHPLUS_URL', '').strip()
+
+
+def get_pushplus_token() -> str:
+    load_env_file()
+    return os.getenv('PUSHPLUS_TOKEN', '').strip()
+
+
+def get_pushplus_target() -> str:
+    """推送目标：优先完整 URL（自定义网关），否则用 token。"""
+    return get_pushplus_url() or get_pushplus_token()
