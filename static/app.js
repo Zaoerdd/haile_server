@@ -1876,7 +1876,7 @@ function renderWashMachineView() {
                 </div>
                 <label class="mode-select">
                     选择模式
-                    ${renderSelect('washModeSelect', modeOptions, '请选择模式')}
+                    ${renderSelect('washModeSelect', modeOptions, '请选择模式', resolveDefaultModeValue(machine.modes, machine.goodsId))}
                 </label>
                 ${machine.supportsVirtualScan && machine.scanCode ? `
                     <div class="spacer-sm"></div>
@@ -1918,7 +1918,7 @@ function renderWashScanView() {
             </div>
             <label class="mode-select">
                 选择模式
-                ${renderSelect('scanModeSelect', modeOptions, '请选择模式')}
+                ${renderSelect('scanModeSelect', modeOptions, '请选择模式', resolveDefaultModeValue(machine.modes, machine.goodsId))}
             </label>
             <div class="spacer-sm"></div>
             <div class="action-row">
@@ -2603,9 +2603,87 @@ function renderEmptyState(title, description) {
     `;
 }
 
-function renderSelect(id, items, placeholder) {
+const LAST_MODE_STORAGE_KEY = 'haile:lastMode';
+
+function loadRememberedMode() {
+    try {
+        const raw = window.localStorage.getItem(LAST_MODE_STORAGE_KEY);
+        if (!raw) {
+            return null;
+        }
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function saveRememberedMode(meta) {
+    const modeId = String((meta || {}).modeId || '').trim();
+    if (!modeId) {
+        return;
+    }
+    try {
+        window.localStorage.setItem(LAST_MODE_STORAGE_KEY, JSON.stringify({
+            goodsId: String(meta.goodsId || '').trim(),
+            modeId,
+            label: String(meta.label || '').trim(),
+        }));
+    } catch (error) {
+        // localStorage 不可用时安静跳过，不影响下单
+    }
+}
+
+function resolveDefaultModeValue(modes, goodsId) {
+    const items = Array.isArray(modes) ? modes : [];
+    const remembered = loadRememberedMode();
+    if (!items.length || !remembered) {
+        return '';
+    }
+
+    const normalizedGoodsId = String(goodsId || '').trim();
+    const rememberedModeId = String(remembered.modeId || '').trim();
+    const sameMachine = !normalizedGoodsId || !remembered.goodsId || String(remembered.goodsId) === normalizedGoodsId;
+    if (sameMachine && rememberedModeId) {
+        const matched = items.find(item => String(item.id) === rememberedModeId);
+        if (matched) {
+            return String(matched.id);
+        }
+    }
+
+    const rememberedLabel = String(remembered.label || '').trim();
+    if (rememberedLabel) {
+        const matchedByLabel = items.find(item => String(item.label || '').trim() === rememberedLabel);
+        if (matchedByLabel) {
+            return String(matchedByLabel.id);
+        }
+    }
+    return '';
+}
+
+function findModeMeta(modeId) {
+    const target = String(modeId || '').trim();
+    const sources = [
+        { goodsId: (state.wash.scanMachine || {}).goodsId, modes: (state.wash.scanMachine || {}).modes },
+        { goodsId: (state.wash.machineDetail || {}).goodsId, modes: (state.wash.machineDetail || {}).modes },
+    ];
+    for (const source of sources) {
+        const found = (source.modes || []).find(item => String(item.id) === target);
+        if (found) {
+            return { goodsId: source.goodsId, modeId: target, label: found.label || '' };
+        }
+    }
+    return { goodsId: '', modeId: target, label: '' };
+}
+
+function renderSelect(id, items, placeholder, selectedValue = '') {
+    const target = String(selectedValue || '');
     const options = [`<option value="">${escapeHtml(placeholder)}</option>`]
-        .concat((items || []).map(item => `<option value="${escapeHtml(String(item.value))}">${escapeHtml(item.label)}</option>`));
+        .concat((items || []).map(item => {
+            const value = String(item.value);
+            const selected = target && value === target ? ' selected' : '';
+            return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(item.label)}</option>`;
+        }));
     return `<select id="${escapeHtml(id)}">${options.join('')}</select>`;
 }
 
@@ -2983,6 +3061,10 @@ async function startScanProcess(options = {}) {
     const data = await apiPost('/api/process/start', { qrCode, modeId });
     const processId = (data.process || {}).processId;
     state.wash.result = null;
+    if (processId) {
+        // 记住本次使用的模式，下次打开同一台设备默认选中
+        saveRememberedMode(findModeMeta(modeId));
+    }
     if (!processId) {
         showToastMessage(data.msg || '流程已创建。');
         return;
