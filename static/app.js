@@ -48,6 +48,7 @@ const state = {
         // 正在执行一次会改变服务端状态的洗衣操作（建单/付款/放弃），用于互斥防重复提交
         busy: false,
         busyText: '',
+        busyTimer: null,
         homeLoaded: false,
         rooms: [],
         scanMachines: [],
@@ -124,6 +125,50 @@ function withBasePath(path) {
         return `${BASE_PATH}${raw}`;
     }
     return `${BASE_PATH}/${raw.replace(/^\/+/, '')}`;
+}
+
+function formatModeOptionLabel(mode) {
+    const source = mode || {};
+    const label = String(source.label || source.goodsItemName || '模式').trim();
+    const rawPrice = String(source.price === undefined || source.price === null ? '' : source.price).replace(/[^\d.]/g, '');
+    const price = rawPrice ? Number(rawPrice) : 0;
+    const minutes = String(source.unit || source.duration || '').trim();
+    if (price > 0) {
+        return `${label} · ￥${price.toFixed(2)}`;
+    }
+    // 价格为 0（学校免费机）时，时长才是用户关心的信息
+    if (minutes) {
+        return `${label} · ${minutes} 分钟`;
+    }
+    return label;
+}
+
+function resolveModeMetaById(modeId) {
+    const target = String(modeId || '').trim();
+    if (!target) {
+        return null;
+    }
+    const sources = [(state.wash.scanMachine || {}).modes, (state.wash.machineDetail || {}).modes];
+    for (const modes of sources) {
+        if (!Array.isArray(modes)) {
+            continue;
+        }
+        const found = modes.find(item => String(item.id) === target);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+}
+
+function hapticFeedback(duration = 40) {
+    try {
+        if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+            navigator.vibrate(duration);
+        }
+    } catch (error) {
+        // 部分 WebView 禁用振动，忽略即可
+    }
 }
 
 function displayProcessStepId(stepId) {
@@ -1594,7 +1639,7 @@ function populateReservationModeOptions(modes) {
         el.reservationMode,
         (modes || []).map(mode => ({
             value: String(mode.id),
-            label: `${mode.label} · ${mode.price} 元`,
+            label: formatModeOptionLabel(mode),
         })),
         modes && modes.length ? '请选择模式' : '暂无模式'
     );
@@ -1712,19 +1757,47 @@ function renderWashLoading(message) {
 // 洗衣相关写操作的互斥：返回 false 表示已有操作在执行，调用方应直接返回。
 // 必须走 renderWash() 的 busy 分支，否则每秒的 liveClock 重渲染会把按钮放回来，
 // 用户可以重复点「付款」→ 并发触发两次支付。
-function beginWashBusy(message) {
+const WASH_BUSY_STAGES = {
+    create: ['正在创建订单…', '正在确认放衣…', '正在进入待付款…'],
+    pay: ['正在生成支付参数…', '正在发起支付…', '正在启动设备…'],
+    reset: ['正在取消订单…'],
+};
+
+function beginWashBusy(message, stages) {
     if (state.wash.busy) {
         return false;
     }
     state.wash.busy = true;
-    state.wash.busyText = message || '正在处理，请稍候…';
+    const list = Array.isArray(stages) && stages.length ? stages : null;
+    state.wash.busyText = list ? list[0] : (message || '正在处理，请稍候…');
     renderWashLoading(state.wash.busyText);
+
+    if (state.wash.busyTimer) {
+        window.clearInterval(state.wash.busyTimer);
+        state.wash.busyTimer = null;
+    }
+    if (list && list.length > 1) {
+        // 单次请求内部的真实阶段拿不到，按经验节奏提示，缓解"卡住"的错觉
+        let index = 0;
+        state.wash.busyTimer = window.setInterval(() => {
+            if (!state.wash.busy) {
+                return;
+            }
+            index = Math.min(index + 1, list.length - 1);
+            state.wash.busyText = list[index];
+            renderWashLoading(state.wash.busyText);
+        }, 1400);
+    }
     return true;
 }
 
 function endWashBusy() {
     state.wash.busy = false;
     state.wash.busyText = '';
+    if (state.wash.busyTimer) {
+        window.clearInterval(state.wash.busyTimer);
+        state.wash.busyTimer = null;
+    }
 }
 
 function renderWash() {
@@ -1864,7 +1937,7 @@ function renderWashMachineView() {
     const subtitle = uniqueSubtitle(machine.name || '设备', locationText);
     const modeOptions = (machine.modes || []).map(mode => ({
         value: String(mode.id),
-        label: `${mode.label} · ${mode.price} 元`,
+        label: formatModeOptionLabel(mode),
     }));
     return `
         <div class="wash-machine-modal" aria-hidden="false">
@@ -1924,7 +1997,7 @@ function renderWashScanView() {
 
     const modeOptions = (machine.modes || []).map(mode => ({
         value: String(mode.id),
-        label: `${mode.label} · ${mode.price} 元`,
+        label: formatModeOptionLabel(mode),
     }));
     return `
         <section class="panel-card">
@@ -1965,9 +2038,20 @@ function renderWashProcessView() {
     const displayStep = displayProcessStepId(currentStep) || 1;
     const displayStepLabel = processDisplayStepLabel(process);
     const isPayStep = displayStep === 2 && !process.completed && !process.terminated;
-    const nextButtonLabel = isPayStep ? '付款' : `下一步：${displayStepLabel || '继续'}`;
     const order = process.order || null;
     const orderNo = process.orderNo || ((process.contextSummary || {}).orderNo) || '';
+    const activeMode = resolveModeMetaById(process.modeId);
+    const payContextParts = [
+        order ? order.machineName : '',
+        activeMode ? activeMode.label : (order ? order.modeName : ''),
+        activeMode && activeMode.unit ? `${activeMode.unit} 分钟` : '',
+    ].filter(Boolean);
+    const payContext = payContextParts.join(' · ');
+    const nextButtonLabel = isPayStep
+        ? (activeMode && activeMode.label
+            ? `付款 · ${activeMode.label}${activeMode.unit ? ` ${activeMode.unit} 分钟` : ''}`
+            : '付款')
+        : `下一步：${displayStepLabel || '继续'}`;
     const stepList = PROCESS_STEPS.map(step => {
         let className = 'pending';
         let text = '待执行';
@@ -1995,7 +2079,11 @@ function renderWashProcessView() {
     const summaryCard = process.terminated
         ? renderStatusCard('danger', '流程已终止', process.blockedReason || '当前流程无法继续。')
         : process.completed
-            ? renderStatusCard('success', '流程已完成', '订单已经支付并启动。')
+            ? renderStatusCard(
+                'success',
+                '流程已完成',
+                `订单已经支付并启动。${order && order.finishTime ? `预计 ${formatDateTime(order.finishTime)} 结束` : ''}`,
+            )
             : renderStatusCard('warning', '手动扫码流程', `当前步骤：${displayStepLabel}`);
 
     return `
@@ -2029,14 +2117,20 @@ function renderWashProcessView() {
             ${isPayStep ? `
                 <div class="callout warning">
                     <strong>订单已进入待付款</strong>
+                    ${payContext ? `<p class="body-text">${escapeHtml(payContext)}</p>` : ''}
                     <p class="body-text">点击「付款」将直接完成支付并启动设备。</p>
                 </div>
                 <div class="spacer-sm"></div>
             ` : ''}
             <div class="action-row">
-                ${!process.completed && !process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">${escapeHtml(nextButtonLabel)}</button>` : ''}
-                <button class="btn btn-light" type="button" data-action="goto-orders">去订单页继续</button>
-                <button class="btn btn-danger" type="button" data-action="reset-process">放弃流程</button>
+                ${process.completed ? `
+                    <button class="btn btn-primary" type="button" data-action="back-home">返回首页</button>
+                    <button class="btn btn-light" type="button" data-action="goto-orders">查看订单</button>
+                ` : `
+                    ${!process.terminated ? `<button class="btn btn-primary" type="button" data-action="next-process">${escapeHtml(nextButtonLabel)}</button>` : ''}
+                    <button class="btn btn-light" type="button" data-action="goto-orders">去订单页继续</button>
+                    ${!process.terminated ? `<button class="btn btn-danger" type="button" data-action="reset-process">${isPayStep ? '取消订单' : '放弃流程'}</button>` : ''}
+                `}
             </div>
         </section>
     `;
@@ -3083,7 +3177,7 @@ async function startScanProcess(options = {}) {
         return;
     }
 
-    if (!beginWashBusy('正在创建订单并确认放衣…')) {
+    if (!beginWashBusy('正在创建订单并确认放衣…', WASH_BUSY_STAGES.create)) {
         return;
     }
 
@@ -3105,6 +3199,7 @@ async function startScanProcess(options = {}) {
         await loadActiveProcesses();
         refreshOrdersOverview(true, { silent: true, preserveItems: true });
         showToastMessage(normalizeProcessToastMessage(nextData.msg));
+        hapticFeedback();
     } catch (error) {
         if (processId) {
             try {
@@ -3130,7 +3225,7 @@ async function advanceProcess() {
 
     const displayStep = displayProcessStepId(Number(process.currentStep || 1)) || 1;
     const busyText = displayStep === 1 ? '正在创建订单并确认放衣…' : '正在生成支付参数并启动…';
-    if (!beginWashBusy(busyText)) {
+    if (!beginWashBusy(busyText, displayStep === 1 ? WASH_BUSY_STAGES.create : WASH_BUSY_STAGES.pay)) {
         return;
     }
 
@@ -3145,6 +3240,7 @@ async function advanceProcess() {
             refreshOrdersOverview(true, { silent: true, preserveItems: true });
         }
         showToastMessage(normalizeProcessToastMessage(data.msg));
+        hapticFeedback((data.process || {}).completed ? 60 : 40);
     } catch (error) {
         try {
             await openProcess(process.processId, { pushHistory: false });
@@ -3174,10 +3270,14 @@ async function resetProcess() {
         pushHistoryState();
         return;
     }
-    if (!(await showConfirmDialog('确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。'))) {
+    const isPayStep = displayProcessStepId(Number(process.currentStep || 1)) === 2;
+    const confirmText = isPayStep
+        ? '确定取消这笔待付款订单吗？取消后设备会被释放，需要重新下单。'
+        : '确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。';
+    if (!(await showConfirmDialog(confirmText))) {
         return;
     }
-    if (!beginWashBusy('正在放弃流程…')) {
+    if (!beginWashBusy('正在取消订单…', WASH_BUSY_STAGES.reset)) {
         return;
     }
     try {
@@ -3186,6 +3286,7 @@ async function resetProcess() {
             cleanupRemote: true,
         });
         showToastMessage(data.msg || '流程已重置。');
+        hapticFeedback();
         clearWashTransientState();
         state.wash.view = 'home';
         renderGlobalRefresh();
