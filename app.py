@@ -577,7 +577,7 @@ def sync_order_detail_after_action(
     debug_items: list[Any] = []
     max_attempts = max(1, int(attempts))
     for attempt in range(max_attempts):
-        detail_res = client.order_detail(normalized_order_no)
+        detail_res = client.order_detail(normalized_order_no, settle=False)
         debug_items.append(detail_res.get('raw'))
         if detail_res.get('ok'):
             detail = detail_res.get('data') or {}
@@ -1437,7 +1437,7 @@ def create_order_by_scan():
     order_no = (((result.get('process') or {}).get('contextSummary') or {}).get('orderNo') or '').strip()
     order_detail_payload = None
     if order_no:
-        detail_res = HaierClient(token).order_detail(order_no)
+        detail_res = HaierClient(token).order_detail(order_no, settle=False)
         if detail_res.get('ok'):
             order_detail_payload = normalize_order_detail(detail_res.get('data') or {})
 
@@ -1459,7 +1459,7 @@ def order_detail(order_no: str):
     if not token:
         return jsonify(build_token_missing_payload()), 400
 
-    res = HaierClient(token).order_detail(order_no)
+    res = HaierClient(token).order_detail(order_no, settle=False)
     if not res.get('ok'):
         return json_error(res.get('msg') or '读取订单详情失败。', error_type=res.get('error_type', 'order_detail_failed'), debug=res.get('raw'))
     return jsonify({'status': 'success', 'order': normalize_order_detail(res.get('data') or {}), 'debug': res.get('raw')})

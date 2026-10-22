@@ -2983,6 +2983,9 @@ async function advanceProcess() {
         return;
     }
 
+    const displayStep = displayProcessStepId(Number(process.currentStep || 1)) || 1;
+    renderWashLoading(displayStep === 1 ? '正在创建订单并确认放衣…' : '正在生成支付参数并启动…');
+
     try {
         const data = await apiPost('/api/process/next', { processId: process.processId });
         await openProcess(process.processId, { pushHistory: false });

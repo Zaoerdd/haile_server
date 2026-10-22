@@ -402,9 +402,14 @@ class HaierClient:
         }
         return self._request('POST', '/trade/lockOrderCreate', json=payload)
 
-    def order_detail(self, order_no: str) -> Dict[str, Any]:
+    def order_detail(self, order_no: str, *, settle: bool = True) -> Dict[str, Any]:
+        """读取订单详情。
+
+        settle=True 时会再查一次（中间固定 sleep），用于「动作之后等云端状态收敛」；
+        纯读取/轮询场景请传 settle=False，避免一次点击里成倍放大请求数。
+        """
         result = self._request('GET', '/trade/order/detail', params={'orderNo': order_no})
-        if not result.get('ok') or ORDER_DETAIL_SYNC_DELAY_MS <= 0:
+        if not settle or not result.get('ok') or ORDER_DETAIL_SYNC_DELAY_MS <= 0:
             return result
 
         time.sleep(ORDER_DETAIL_SYNC_DELAY_MS / 1000)

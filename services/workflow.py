@@ -313,7 +313,7 @@ class WorkflowManager:
                     state.context['hash_key'] = str(scan_data.get('activityHashKey') or '')
 
         if detail is None:
-            detail_res = client.order_detail(normalized_order_no)
+            detail_res = client.order_detail(normalized_order_no, settle=False)
             if detail_res.get('ok'):
                 detail = detail_res.get('data') or {}
 
@@ -583,7 +583,7 @@ class WorkflowManager:
                 'msg': '已回退到第二阶段起点。',
             }
 
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         if not detail_res.get('ok'):
             state.completed = False
             state.terminated = True
@@ -742,7 +742,7 @@ class WorkflowManager:
 
     def cleanup_order_by_no(self, token: str, order_no: str) -> Dict[str, Any]:
         client = HaierClient(token)
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         detail = detail_res.get('data') or {}
         classification = self._classify_order_detail(detail) if detail_res.get('ok') else 'unknown'
 
@@ -818,7 +818,7 @@ class WorkflowManager:
 
         order_no = str(state.context.get('order_no') or '').strip()
         if order_no:
-            detail_res = client.order_detail(order_no)
+            detail_res = client.order_detail(order_no, settle=False)
             if detail_res.get('ok'):
                 order_summary = self._normalize_order_summary(detail_res.get('data') or {})
             elif not blocked_reason:
@@ -888,7 +888,7 @@ class WorkflowManager:
         if not order_no:
             return None
 
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         if not detail_res.get('ok'):
             if fail_on_unavailable:
                 return self._error(
@@ -970,8 +970,10 @@ class WorkflowManager:
             return current
 
         checks = 0
+        # 轮询本身就是在等状态收敛，这里用单请求读（settle=False），
+        # 否则每次轮询都会再补一次请求 + 固定 sleep，成倍放大耗时。
         while checks < max_checks and self._classify_order_detail(current) == 'pending' and not self._is_final_pending_stage(current):
-            next_res = client.order_detail(normalized_order_no)
+            next_res = client.order_detail(normalized_order_no, settle=False)
             if not next_res.get('ok'):
                 return current
             next_detail = next_res.get('data') or {}
@@ -979,13 +981,6 @@ class WorkflowManager:
                 return current
             current = next_detail
             checks += 1
-
-        if self._is_final_pending_stage(current):
-            final_res = client.order_detail(normalized_order_no)
-            if final_res.get('ok'):
-                final_detail = final_res.get('data') or {}
-                if isinstance(final_detail, dict) and final_detail:
-                    current = final_detail
 
         return current
 
@@ -1001,7 +996,7 @@ class WorkflowManager:
             return self._error('invalid_state', '缺少 orderNo，请重新开始流程。', state)
 
         debug_payload = dict(debug or {})
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         debug_payload['orderDetail'] = detail_res.get('raw')
         if not detail_res.get('ok'):
             return self._error_result(detail_res, state)
@@ -1056,7 +1051,7 @@ class WorkflowManager:
         place_res = client.place_clothes(order_no)
         debug_payload['placeClothes'] = place_res.get('raw')
         if not place_res.get('ok'):
-            detail_res = client.order_detail(order_no)
+            detail_res = client.order_detail(order_no, settle=False)
             debug_payload['orderDetail'] = detail_res.get('raw')
             if detail_res.get('ok'):
                 detail = self._settle_pending_order_detail(client, order_no, detail_res.get('data') or {})
@@ -1070,7 +1065,7 @@ class WorkflowManager:
                     return self._success(state, success_msg, debug_payload)
             return self._error_result(place_res, state)
 
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         debug_payload['orderDetail'] = detail_res.get('raw')
         if not detail_res.get('ok'):
             return self._error_result(detail_res, state)
@@ -1239,7 +1234,7 @@ class WorkflowManager:
             return self._error('invalid_state', '缺少 orderNo，请重新开始流程。', state)
 
         debug_payload: Dict[str, Any] = {}
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         debug_payload['orderDetail'] = detail_res.get('raw')
         if not detail_res.get('ok'):
             return self._error_result(detail_res, state)

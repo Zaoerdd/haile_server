@@ -406,8 +406,9 @@ class ReservationService:
             return current
 
         checks = 0
+        # 轮询本身就在等状态收敛，用单请求读避免每次多补一次请求 + 固定 sleep
         while checks < max_checks and self._classify_order_detail(current) == 'pending' and not self._is_final_pending_stage(current):
-            next_res = client.order_detail(normalized_order_no)
+            next_res = client.order_detail(normalized_order_no, settle=False)
             if not next_res.get('ok'):
                 return current
             next_detail = next_res.get('data') or {}
@@ -415,13 +416,6 @@ class ReservationService:
                 return current
             current = next_detail
             checks += 1
-
-        if self._is_final_pending_stage(current):
-            final_res = client.order_detail(normalized_order_no)
-            if final_res.get('ok'):
-                final_detail = final_res.get('data') or {}
-                if isinstance(final_detail, dict) and final_detail:
-                    current = final_detail
 
         return current
 
@@ -447,13 +441,13 @@ class ReservationService:
             place_res = client.place_clothes(normalized_order_no)
             debug['placeClothes'] = place_res.get('raw')
             if not place_res.get('ok'):
-                detail_res = client.order_detail(normalized_order_no)
+                detail_res = client.order_detail(normalized_order_no, settle=False)
                 debug['orderDetail'] = detail_res.get('raw')
                 if not detail_res.get('ok'):
                     return False, current if isinstance(current, dict) else None, debug, place_res.get('msg') or '自动放入衣服失败。'
                 current = detail_res.get('data') or {}
             else:
-                detail_res = client.order_detail(normalized_order_no)
+                detail_res = client.order_detail(normalized_order_no, settle=False)
                 debug['orderDetail'] = detail_res.get('raw')
                 if not detail_res.get('ok'):
                     return False, current if isinstance(current, dict) else None, debug, detail_res.get('msg') or '读取订单详情失败。'
@@ -485,7 +479,7 @@ class ReservationService:
         max_attempts = max(1, int(attempts))
         last_detail: Dict[str, Any] | None = None
         for attempt in range(max_attempts):
-            detail_res = client.order_detail(normalized_order_no)
+            detail_res = client.order_detail(normalized_order_no, settle=False)
             if detail_res.get('ok'):
                 detail = detail_res.get('data') or {}
                 if isinstance(detail, dict) and detail:
@@ -516,7 +510,7 @@ class ReservationService:
             return
 
         client = HaierClient(token)
-        detail_res = client.order_detail(normalized_order_no)
+        detail_res = client.order_detail(normalized_order_no, settle=False)
         if not detail_res.get('ok'):
             return
 
@@ -995,7 +989,7 @@ class ReservationService:
                     continue
 
                 debug: Dict[str, Any] = {'source': source, 'summary': summary}
-                detail_res = client.order_detail(order_no)
+                detail_res = client.order_detail(order_no, settle=False)
                 debug['orderDetail'] = detail_res.get('raw')
                 if not detail_res.get('ok'):
                     remember_issue(
@@ -1126,7 +1120,7 @@ class ReservationService:
         order_no = str(order_data.get('orderNo') or '').strip()
         if not order_no:
             return False, '创建预约订单成功，但未返回 orderNo。', create_res.get('raw'), 'failed'
-        detail_res = client.order_detail(order_no)
+        detail_res = client.order_detail(order_no, settle=False)
         if not detail_res.get('ok'):
             return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
         ok, detail, debug, error_msg = self._ensure_final_pending_order(client, order_no, detail_res.get('data') or {})
