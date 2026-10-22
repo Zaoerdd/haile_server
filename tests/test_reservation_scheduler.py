@@ -248,6 +248,7 @@ class ReservationEarlyRenewTests(unittest.TestCase):
 
         with patch('services.reservation_service.now_local', return_value=self.now), \
             patch('services.reservation_service.database.fetch_all', return_value=[self.task_row]), \
+            patch('services.reservation_service.database.fetch_one', return_value={'status': 'holding'}), \
             patch('services.reservation_service.settings_store.get_effective_settings', return_value=types.SimpleNamespace(token='token')), \
             patch('services.reservation_service.HaierClient', return_value=client), \
             patch.object(reservation_service, '_retry_order_detail', side_effect=retry_side_effect) as retry_mock, \
@@ -282,6 +283,7 @@ class ReservationEarlyRenewTests(unittest.TestCase):
         self.assertEqual(outcome['create'].call_args.kwargs['excluded_order_nos'], {'old-order'})
         outcome['update_task'].assert_any_call(
             1,
+            expect_statuses=ANY,
             status='holding',
             active_order_no='new-order',
             current_order_snapshot=ANY,
@@ -353,6 +355,7 @@ class ReservationEarlyRenewTests(unittest.TestCase):
 
         with patch('services.reservation_service.now_local', return_value=self.now), \
             patch('services.reservation_service.database.fetch_all', return_value=[task_row]), \
+            patch('services.reservation_service.database.fetch_one', return_value={'status': 'holding'}), \
             patch('services.reservation_service.settings_store.get_effective_settings', return_value=types.SimpleNamespace(token='token')), \
             patch('services.reservation_service.HaierClient', return_value=client), \
             patch.object(reservation_service, '_retry_order_detail') as retry_mock, \
@@ -403,6 +406,7 @@ class ReservationEarlyRenewTests(unittest.TestCase):
 
         with patch('services.reservation_service.now_local', return_value=now), \
             patch('services.reservation_service.database.fetch_all', return_value=[task_row]), \
+            patch('services.reservation_service.database.fetch_one', return_value={'status': 'holding'}), \
             patch('services.reservation_service.settings_store.get_effective_settings', return_value=types.SimpleNamespace(token='token')), \
             patch('services.reservation_service.HaierClient', return_value=client), \
             patch.object(reservation_service, '_retry_order_detail', side_effect=[old_pending_detail, old_closed_detail]) as retry_mock, \
@@ -420,6 +424,7 @@ class ReservationEarlyRenewTests(unittest.TestCase):
         create_mock.assert_called_once()
         update_task_mock.assert_any_call(
             1,
+            expect_statuses=ANY,
             status='holding',
             active_order_no='new-order',
             current_order_snapshot=ANY,

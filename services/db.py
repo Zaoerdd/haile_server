@@ -148,6 +148,13 @@ class Database:
                 cursor = connection.execute(query, params)
                 return int(cursor.lastrowid or 0)
 
+    def execute_affected(self, query: str, params: Sequence[Any] = ()) -> int:
+        """执行 UPDATE/DELETE 并返回受影响行数，用于条件更新（乐观锁）。"""
+        with self._lock:
+            with self.connect() as connection:
+                cursor = connection.execute(query, params)
+                return int(cursor.rowcount or 0)
+
     def execute_many(self, query: str, rows: Sequence[Sequence[Any]]) -> None:
         with self._lock:
             with self.connect() as connection:

@@ -37,6 +37,9 @@ MACHINE_IDENTIFIER_KEYS = {
     'sn',
     'code',
 }
+# 允许被调度器继续推进的任务状态；用户暂停/删除后不在其中
+LIVE_TASK_STATUSES = ('scheduled', 'holding')
+
 NO_ADOPTABLE_PENDING_ORDER_MESSAGE = '没有找到可接手的最终待付款订单。'
 HISTORY_ORDER_LOOKUP_PAGE_SIZE = 20
 EARLY_RENEW_LEAD_SECONDS = 60
@@ -564,14 +567,17 @@ class ReservationService:
                 continue
 
             if classification == 'closed':
-                self._update_task(
+                # 用户暂停后 active_order_no 仍保留，这里不能把它复活成 scheduled
+                if not self._update_task(
                     task.id,
+                    expect_statuses=LIVE_TASK_STATUSES,
                     status='scheduled',
                     active_order_no=None,
                     current_order_snapshot=None,
                     last_checked_at=now,
                     last_error='订单已失效，等待下一轮补建。',
-                )
+                ):
+                    continue
                 continue
 
             self._update_task(
@@ -861,18 +867,34 @@ class ReservationService:
             self._record_event(task.id, 'manual_order_closed', reason, {'orderNo': order_no})
             self._notify('预约任务已暂停', f'{task.title}\n{reason}')
 
-    def _update_task(self, task_id: int, **changes: Any) -> None:
+    def _update_task(
+        self,
+        task_id: int,
+        *,
+        expect_statuses: tuple[str, ...] | None = None,
+        **changes: Any,
+    ) -> bool:
+        """更新任务字段。
+
+        expect_statuses 不为空时做条件更新（乐观锁）：只有任务仍处于这些状态才写入，
+        返回是否真的写到了行。用于避免调度器把用户刚「暂停/删除」的任务改回 holding。
+        """
         if not changes:
-            return
+            return False
         fields = []
-        params = []
+        params: list[Any] = []
         for key, value in changes.items():
             fields.append(f'{key} = ?')
             params.append(value)
         fields.append('updated_at = ?')
         params.append(to_iso(now_local()) or '')
         params.append(task_id)
-        database.execute(f"UPDATE reservation_tasks SET {', '.join(fields)} WHERE id = ?", tuple(params))
+        query = f"UPDATE reservation_tasks SET {', '.join(fields)} WHERE id = ?"
+        if expect_statuses:
+            placeholders = ', '.join('?' for _ in expect_statuses)
+            query += f' AND status IN ({placeholders})'
+            params.extend(expect_statuses)
+        return database.execute_affected(query, tuple(params)) > 0
 
     def _collect_keyed_values(self, obj: Any, keys: set[str]) -> set[str]:
         found: set[str] = set()
@@ -1120,10 +1142,28 @@ class ReservationService:
         order_no = str(order_data.get('orderNo') or '').strip()
         if not order_no:
             return False, '创建预约订单成功，但未返回 orderNo。', create_res.get('raw'), 'failed'
+
+        # 订单已经在服务端真实创建，先落库。否则后续步骤失败时调用方会把 active_order_no
+        # 留空，下一轮又去新建一单，产生无人支付的孤儿订单。
+        self._update_task(
+            task.id,
+            expect_statuses=LIVE_TASK_STATUSES,
+            active_order_no=order_no,
+            last_checked_at=to_iso(now_local()),
+        )
+
         detail_res = client.order_detail(order_no, settle=False)
         if not detail_res.get('ok'):
             return False, detail_res.get('msg') or '读取新建订单详情失败。', detail_res.get('raw'), 'failed'
-        ok, detail, debug, error_msg = self._ensure_final_pending_order(client, order_no, detail_res.get('data') or {})
+        detail_data = detail_res.get('data') or {}
+        if isinstance(detail_data, dict) and detail_data:
+            # 同时保存快照：下一轮能识别出「已有待付款订单」，走接手/推进而不是重新建单
+            self._update_task(
+                task.id,
+                expect_statuses=LIVE_TASK_STATUSES,
+                current_order_snapshot=self._serialize_current_order(self._normalize_current_order(detail_data)),
+            )
+        ok, detail, debug, error_msg = self._ensure_final_pending_order(client, order_no, detail_data)
         if not ok or not detail:
             return False, error_msg or '订单未能进入最终待付款状态。', debug, 'failed'
         return True, order_no, detail, 'created'
@@ -1230,6 +1270,7 @@ class ReservationService:
         adopted_count = 0
         recreated_count = 0
         completed_count = 0
+        processed_count = 0
         rows = database.fetch_all(
             '''
             SELECT *
@@ -1240,6 +1281,11 @@ class ReservationService:
         )
         for row in rows:
             task = ReservationTask.from_row(row)
+            # 取到行之后用户可能已经暂停/删除，长网络调用前再确认一次
+            status_row = database.fetch_one('SELECT status FROM reservation_tasks WHERE id = ?', (task.id,))
+            if not status_row or str(status_row['status']) not in LIVE_TASK_STATUSES:
+                continue
+            processed_count += 1
             start_at, hold_until = build_windows(task.target_time, task.lead_minutes)
 
             if now < start_at:
@@ -1291,15 +1337,18 @@ class ReservationService:
                     self._notify('预约已接管现有订单', f'{task.title}\n订单号：{order_no}')
                     continue
                 created_count += 1
-                self._update_task(
+                if not self._update_task(
                     task.id,
+                    expect_statuses=LIVE_TASK_STATUSES,
                     status='holding',
                     active_order_no=order_no,
                     current_order_snapshot=current_order_snapshot,
                     last_checked_at=to_iso(now),
                     last_run_at=to_iso(now),
                     last_error=None,
-                )
+                ):
+                    self._record_event(task.id, 'task_skipped_after_concurrent_change', '任务状态已被用户修改，本轮建单结果不写回。')
+                    continue
                 self._record_event(task.id, 'order_created', '预约订单已创建，并已自动放入衣物进入待付款状态。', {'orderNo': order_no, 'processId': process_id})
                 self._notify('预约订单已创建', f'{task.title}\n订单号：{order_no}')
                 continue
@@ -1337,7 +1386,9 @@ class ReservationService:
                         last_error=None,
                     )
                 if task.status != 'holding':
-                    self._update_task(task.id, status='holding')
+                    if not self._update_task(task.id, expect_statuses=LIVE_TASK_STATUSES, status='holding'):
+                        self._record_event(task.id, 'task_skipped_after_concurrent_change', '任务状态已被用户修改，本轮跳过。')
+                        continue
                 if self._is_early_renew_due(snapshot, now):
                     previous_order_no = str(task.active_order_no or '').strip()
                     refreshed_detail = self._retry_order_detail(client, previous_order_no)
@@ -1426,15 +1477,18 @@ class ReservationService:
                                 continue
 
                             recreated_count += 1
-                            self._update_task(
+                            if not self._update_task(
                                 task.id,
+                                expect_statuses=LIVE_TASK_STATUSES,
                                 status='holding',
                                 active_order_no=order_no,
                                 current_order_snapshot=current_order_snapshot,
                                 last_checked_at=to_iso(now),
                                 last_run_at=to_iso(now),
                                 last_error=None,
-                            )
+                            ):
+                                self._record_event(task.id, 'task_skipped_after_concurrent_change', '任务状态已被用户修改，本轮换单结果不写回。')
+                                continue
                             self._record_event(
                                 task.id,
                                 'order_early_recreated',
@@ -1568,15 +1622,18 @@ class ReservationService:
                     continue
 
                 recreated_count += 1
-                self._update_task(
+                if not self._update_task(
                     task.id,
+                    expect_statuses=LIVE_TASK_STATUSES,
                     status='holding',
                     active_order_no=order_no,
                     current_order_snapshot=current_order_snapshot,
                     last_checked_at=to_iso(now),
                     last_run_at=to_iso(now),
                     last_error=None,
-                )
+                ):
+                    self._record_event(task.id, 'task_skipped_after_concurrent_change', '任务状态已被用户修改，本轮补建结果不写回。')
+                    continue
                 self._record_event(
                     task.id,
                     'order_recreated',
@@ -1661,7 +1718,7 @@ class ReservationService:
             )
 
         return {
-            'processed': len(rows),
+            'processed': processed_count,
             'created': created_count,
             'adopted': adopted_count,
             'recreated': recreated_count,

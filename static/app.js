@@ -45,6 +45,9 @@ const state = {
     historyRestoring: false,
     wash: {
         loading: true,
+        // 正在执行一次会改变服务端状态的洗衣操作（建单/付款/放弃），用于互斥防重复提交
+        busy: false,
+        busyText: '',
         homeLoaded: false,
         rooms: [],
         scanMachines: [],
@@ -1706,9 +1709,32 @@ function renderWashLoading(message) {
     el.washView.innerHTML = `<div class="panel-card loading-card">${escapeHtml(message)}</div>`;
 }
 
+// 洗衣相关写操作的互斥：返回 false 表示已有操作在执行，调用方应直接返回。
+// 必须走 renderWash() 的 busy 分支，否则每秒的 liveClock 重渲染会把按钮放回来，
+// 用户可以重复点「付款」→ 并发触发两次支付。
+function beginWashBusy(message) {
+    if (state.wash.busy) {
+        return false;
+    }
+    state.wash.busy = true;
+    state.wash.busyText = message || '正在处理，请稍候…';
+    renderWashLoading(state.wash.busyText);
+    return true;
+}
+
+function endWashBusy() {
+    state.wash.busy = false;
+    state.wash.busyText = '';
+}
+
 function renderWash() {
     if (state.bootstrap.configLoading || state.wash.loading) {
         renderWashLoading('正在加载洗衣房和收藏...');
+        return;
+    }
+
+    if (state.wash.busy) {
+        renderWashLoading(state.wash.busyText || '正在处理，请稍候…');
         return;
     }
 
@@ -3057,34 +3083,41 @@ async function startScanProcess(options = {}) {
         return;
     }
 
-    renderWashLoading('正在创建订单并确认放衣…');
-    const data = await apiPost('/api/process/start', { qrCode, modeId });
-    const processId = (data.process || {}).processId;
-    state.wash.result = null;
-    if (processId) {
-        // 记住本次使用的模式，下次打开同一台设备默认选中
-        saveRememberedMode(findModeMeta(modeId));
-    }
-    if (!processId) {
-        showToastMessage(data.msg || '流程已创建。');
+    if (!beginWashBusy('正在创建订单并确认放衣…')) {
         return;
     }
 
-    // 创建流程后立刻推进到待付款，用户只需再点「付款」
+    let processId = '';
     try {
+        const data = await apiPost('/api/process/start', { qrCode, modeId });
+        processId = (data.process || {}).processId || '';
+        state.wash.result = null;
+        if (!processId) {
+            showToastMessage(data.msg || '流程已创建。');
+            return;
+        }
+        // 记住本次使用的模式，下次打开同一台设备默认选中
+        saveRememberedMode(findModeMeta(modeId));
+
+        // 创建流程后立刻推进到待付款，用户只需再点「付款」
         const nextData = await apiPost('/api/process/next', { processId });
         await openProcess(processId);
         await loadActiveProcesses();
         refreshOrdersOverview(true, { silent: true, preserveItems: true });
         showToastMessage(normalizeProcessToastMessage(nextData.msg));
     } catch (error) {
-        try {
-            await openProcess(processId);
-            await loadActiveProcesses();
-        } catch (refreshError) {
-            handleRequestError(refreshError, '刷新流程状态失败。', true);
+        if (processId) {
+            try {
+                await openProcess(processId);
+                await loadActiveProcesses();
+            } catch (refreshError) {
+                handleRequestError(refreshError, '刷新流程状态失败。', true);
+            }
         }
         throw error;
+    } finally {
+        endWashBusy();
+        renderWash();
     }
 }
 
@@ -3096,7 +3129,10 @@ async function advanceProcess() {
     }
 
     const displayStep = displayProcessStepId(Number(process.currentStep || 1)) || 1;
-    renderWashLoading(displayStep === 1 ? '正在创建订单并确认放衣…' : '正在生成支付参数并启动…');
+    const busyText = displayStep === 1 ? '正在创建订单并确认放衣…' : '正在生成支付参数并启动…';
+    if (!beginWashBusy(busyText)) {
+        return;
+    }
 
     try {
         const data = await apiPost('/api/process/next', { processId: process.processId });
@@ -3121,6 +3157,9 @@ async function advanceProcess() {
             handleRequestError(refreshError, '刷新流程状态失败。', true);
         }
         throw error;
+    } finally {
+        endWashBusy();
+        renderWash();
     }
 }
 
@@ -3138,18 +3177,25 @@ async function resetProcess() {
     if (!(await showConfirmDialog('确定放弃当前流程吗？如已创建订单，会尝试同时结束云端订单。'))) {
         return;
     }
-    const data = await apiPost('/api/process/reset', {
-        processId: process.processId,
-        cleanupRemote: true,
-    });
-    showToastMessage(data.msg || '流程已重置。');
-    clearWashTransientState();
-    state.wash.view = 'home';
-    renderWash();
-    renderGlobalRefresh();
-    scheduleActiveAutoRefresh();
-    pushHistoryState();
-    await refreshOrdersOverview(true);
+    if (!beginWashBusy('正在放弃流程…')) {
+        return;
+    }
+    try {
+        const data = await apiPost('/api/process/reset', {
+            processId: process.processId,
+            cleanupRemote: true,
+        });
+        showToastMessage(data.msg || '流程已重置。');
+        clearWashTransientState();
+        state.wash.view = 'home';
+        renderGlobalRefresh();
+        scheduleActiveAutoRefresh();
+        pushHistoryState();
+        await refreshOrdersOverview(true);
+    } finally {
+        endWashBusy();
+        renderWash();
+    }
 }
 
 async function handleReservationSubmit(event) {
