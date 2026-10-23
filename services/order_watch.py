@@ -56,6 +56,13 @@ def extract_finish_time(detail: Dict[str, Any]) -> Optional[datetime]:
     return parse_iso(raw) if raw else None
 
 
+def flag_of(row: Any, key: str) -> bool:
+    try:
+        return bool(int(row[key] or 0))
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
 def format_time(value: Optional[datetime]) -> str:
     return value.strftime('%H:%M') if isinstance(value, datetime) else '未知'
 
@@ -241,10 +248,31 @@ class OrderWatchService:
             if not should_finish and missing_since is not None:
                 should_finish = (now - missing_since) >= MISSING_GRACE
 
+            started = flag_of(row, 'start_notified')
+            reminded = flag_of(row, 'ending_notified')
+
+            # 海尔会在临近完成时把订单移出「进行中」列表，但结束时间已经缓存下来了。
+            # 这里补一次结束前提醒，否则订单只要提前消失，「还有 N 分钟」就永远发不出去。
+            if started and finish and not should_finish and not reminded:
+                remind_seconds = max(int(PUSHPLUS_ENDING_REMIND_MINUTES), 1) * 60
+                remaining = (finish - now).total_seconds()
+                if 0 < remaining <= remind_seconds:
+                    minutes = max(int(round(remaining / 60)), 1)
+                    machine_name = str(row['machine_name'] or '未知')
+                    result = self._notify(
+                        f'还有 {minutes} 分钟结束',
+                        [f'机器：{machine_name}', f'订单：{order_no}', f'预计结束：{format_time(finish)}'],
+                    )
+                    if result.get('sent'):
+                        report['ending'] += 1
+                        self._mark(order_no, 'ending_notified')
+                    else:
+                        report['notifyFailed'] += 1
+
             if not should_finish:
                 continue
 
-            if not int(row['start_notified'] or 0):
+            if not started:
                 # 只是待付款订单被取消，静默归档
                 self._mark(order_no, 'finished_notified')
                 continue

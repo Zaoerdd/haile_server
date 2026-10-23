@@ -1,5 +1,6 @@
 import types
 import unittest
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from services import order_watch as ow
@@ -36,7 +37,9 @@ class NeverStartedOrderTests(unittest.TestCase):
             patch.object(ow.settings_store, 'get_effective_settings', side_effect=_settings), \
             patch.object(ow.order_watch_service, '_upsert', return_value=dict(self._row)), \
             patch.object(ow.order_watch_service, '_mark') as mark, \
+            patch.object(ow, 'database') as db, \
             patch.object(ow.order_watch_service, '_notify') as notify:
+            db.fetch_all.return_value = []
             ow.order_watch_service.tick()
 
         # 从未开始的订单连结束时间都不会去查，直接跳过，不产生任何通知
@@ -59,7 +62,9 @@ class NeverStartedOrderTests(unittest.TestCase):
             patch.object(ow.settings_store, 'get_effective_settings', side_effect=_settings), \
             patch.object(ow.order_watch_service, '_upsert', return_value=row), \
             patch.object(ow.order_watch_service, '_mark') as mark, \
+            patch.object(ow, 'database') as db, \
             patch.object(ow.order_watch_service, '_notify', return_value={'sent': True}) as notify:
+            db.fetch_all.return_value = []
             report = ow.order_watch_service.tick()
 
         notify.assert_called_once()
@@ -73,6 +78,7 @@ class NeverStartedOrderTests(unittest.TestCase):
             'machine_name': '机器A',
             'finish_time': '2026-10-22T15:00:00+08:00',
             'start_notified': 0,
+            'ending_notified': 0,
             'finished_notified': 0,
             'missing_since': '2026-10-22T14:00:00+08:00',
         }
@@ -162,6 +168,74 @@ class RunningStateKeywordTests(unittest.TestCase):
         self.assertTrue(is_running_state('运行中'))
         self.assertFalse(is_running_state('待付款'))
         self.assertFalse(is_running_state('已完成'))
+
+
+class MissingOrderReminderTests(unittest.TestCase):
+    """订单从进行中列表消失后，仍要用缓存的结束时间补发「还有 N 分钟」。"""
+
+    def _row(self, minutes_from_now, *, start=1, ending=0, finished=0):
+        now = ow.order_watch_service and __import__('services.order_watch', fromlist=['now_local']).now_local()
+        finish = now + timedelta(minutes=minutes_from_now)
+        return now, {
+            'order_no': 'M1',
+            'machine_name': '机器A',
+            'finish_time': finish.isoformat(),
+            'start_notified': start,
+            'ending_notified': ending,
+            'finished_notified': finished,
+            'missing_since': (now - timedelta(minutes=1)).isoformat(),
+        }
+
+    def test_reminder_sent_when_order_left_the_underway_list(self):
+        now, row = self._row(3)
+        report = {'ending': 0, 'finished': 0, 'notifyFailed': 0}
+        with patch.object(ow.order_watch_service, '_notify', return_value={'sent': True}) as notify, \
+            patch.object(ow.order_watch_service, '_mark') as mark, \
+            patch.object(ow, 'database') as db:
+            db.fetch_all.return_value = [row]
+            ow.order_watch_service._handle_missing(set(), now, report)
+
+        notify.assert_called_once()
+        self.assertIn('分钟结束', notify.call_args[0][0])
+        mark.assert_any_call('M1', 'ending_notified')
+        self.assertEqual(report['ending'], 1)
+        self.assertEqual(report['finished'], 0)
+
+    def test_reminder_not_repeated(self):
+        now, row = self._row(3, ending=1)
+        report = {'ending': 0, 'finished': 0, 'notifyFailed': 0}
+        with patch.object(ow.order_watch_service, '_notify', return_value={'sent': True}) as notify, \
+            patch.object(ow.order_watch_service, '_mark') as mark, \
+            patch.object(ow, 'database') as db:
+            db.fetch_all.return_value = [row]
+            ow.order_watch_service._handle_missing(set(), now, report)
+
+        notify.assert_not_called()
+        mark.assert_not_called()
+
+    def test_finished_after_finish_time(self):
+        now, row = self._row(-1)
+        report = {'ending': 0, 'finished': 0, 'notifyFailed': 0}
+        with patch.object(ow.order_watch_service, '_notify', return_value={'sent': True}) as notify, \
+            patch.object(ow.order_watch_service, '_mark') as mark, \
+            patch.object(ow, 'database') as db:
+            db.fetch_all.return_value = [row]
+            ow.order_watch_service._handle_missing(set(), now, report)
+
+        self.assertIn('结束', notify.call_args[0][0])
+        mark.assert_any_call('M1', 'finished_notified')
+        self.assertEqual(report['finished'], 1)
+
+    def test_no_reminder_before_window(self):
+        now, row = self._row(20)
+        report = {'ending': 0, 'finished': 0, 'notifyFailed': 0}
+        with patch.object(ow.order_watch_service, '_notify', return_value={'sent': True}) as notify, \
+            patch.object(ow, 'database') as db:
+            db.fetch_all.return_value = [row]
+            ow.order_watch_service._handle_missing(set(), now, report)
+
+        notify.assert_not_called()
+        self.assertEqual(report['ending'], 0)
 
 
 if __name__ == "__main__":
