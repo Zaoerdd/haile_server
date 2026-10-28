@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import html
 import threading
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import ALLOW_REMOTE, BASE_PATH, DEFAULT_LAT, DEFAULT_LNG, HOST, PORT, SECRET_KEY, SSL_VERIFY, load_machines, normalize_base_path, save_machines
 from services.haier_client import HaierClient
+from services.notifications import describe_target, normalize_target, pushplus_notifier
 from services.reservation_service import reservation_service
 from services.order_watch import order_watch_scheduler
 from services.scheduler import reservation_scheduler
@@ -1168,6 +1170,44 @@ def update_settings():
             'scheduler': reservation_scheduler.snapshot(),
             'orderWatch': order_watch_scheduler.snapshot(),
         }
+    )
+
+
+@app.route('/api/settings/pushplus/test', methods=['POST'])
+def test_pushplus_setting():
+    """发一条测试推送到当前（或刚填的）PushPlus 目标，用于确认 token 可用。"""
+    data = request.get_json(silent=True) or {}
+    target = normalize_target(data.get('target') or '')
+    from_payload = bool(target)
+    if not from_payload:
+        target = settings_store.get_effective_settings().pushplus_url
+    if not target:
+        return json_error('还没有填写 PushPlus token，填好后先保存再测试。', error_type='missing_pushplus_target')
+
+    masked = html.escape(describe_target(target))
+    title = '洗衣房助手 · 测试推送'
+    content = (
+        f'<h3>{title}</h3>'
+        '<p>收到这条说明 PushPlus 配置已经可用，订单开始 / 结束前 5 分钟 / 结束都会推到这里。</p>'
+        f'<p>目标：{masked}</p>'
+        f'<p>时间：{datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")}</p>'
+    )
+    result = pushplus_notifier.notify(target, title, content)
+    if result.get('sent'):
+        return jsonify(
+            {
+                'status': 'success',
+                'msg': '测试推送已发出，去 PushPlus 里看一下。',
+                'sent': True,
+                'target': masked,
+                'source': 'input' if from_payload else 'saved',
+            }
+        )
+    return json_error(
+        result.get('message') or '测试推送发送失败。',
+        error_type=result.get('reason') or 'pushplus_failed',
+        sent=False,
+        target=masked,
     )
 
 

@@ -7,6 +7,7 @@ from typing import Any, Dict
 from config import DEFAULT_LEAD_MINUTES, SCHEDULER_INTERVAL_SECONDS, get_haile_token, get_pushplus_target
 from services.db import database
 from services.haier_client import HaierClient
+from services.notifications import normalize_target
 
 
 MIN_POLL_INTERVAL_SECONDS = 5
@@ -71,7 +72,7 @@ class SettingsStore:
         db_values = self._db_values()
 
         token = db_values.get('token', defaults['token']).strip()
-        pushplus_url = db_values.get('pushplus_url', defaults['pushplus_url']).strip()
+        pushplus_url = normalize_target(db_values.get('pushplus_url', defaults['pushplus_url']))
         default_lead_minutes = clamp_int(
             db_values.get('default_lead_minutes'),
             int(defaults['default_lead_minutes']),
@@ -103,7 +104,7 @@ class SettingsStore:
             token = str(payload.get('token') or '').strip()
             updates.append(('token', token or None))
         if 'pushplusUrl' in payload:
-            pushplus_url = str(payload.get('pushplusUrl') or '').strip()
+            pushplus_url = normalize_target(payload.get('pushplusUrl') or '')
             updates.append(('pushplus_url', pushplus_url or None))
         if 'defaultLeadMinutes' in payload:
             try:

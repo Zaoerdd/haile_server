@@ -299,6 +299,7 @@ function bindElements() {
     el.settingsForm = document.getElementById('settingsForm');
     el.settingsToken = document.getElementById('settingsToken');
     el.settingsPushplusUrl = document.getElementById('settingsPushplusUrl');
+    el.settingsPushTestBtn = document.getElementById('settingsPushTestBtn');
     el.settingsLeadMinutes = document.getElementById('settingsLeadMinutes');
     el.settingsPollInterval = document.getElementById('settingsPollInterval');
     el.settingsInfo = document.getElementById('settingsInfo');
@@ -319,6 +320,9 @@ function bindEvents() {
     el.ordersList.addEventListener('click', handleOrderClick);
     el.ordersList.addEventListener('keydown', handleClickableCardKeydown);
     el.settingsForm.addEventListener('submit', handleSettingsSubmit);
+    if (el.settingsPushTestBtn) {
+        el.settingsPushTestBtn.addEventListener('click', handlePushplusTest);
+    }
     el.reservationForm.addEventListener('submit', handleReservationSubmit);
     el.loadMoreOrdersBtn.addEventListener('click', async () => {
         if (!state.orders.loading && state.orders.hasMore && ensureTokenReady()) {
@@ -3586,6 +3590,32 @@ async function handleSettingsSubmit(event) {
         }
     } catch (error) {
         handleRequestError(error, '保存设置失败。', true);
+    }
+}
+
+async function handlePushplusTest() {
+    const button = el.settingsPushTestBtn;
+    if (!button || button.disabled) {
+        return;
+    }
+    const typed = el.settingsPushplusUrl.value.trim();
+    const saved = (state.settings || {}).pushplusUrl || '';
+    if (!typed && !saved) {
+        showToastMessage('先填写 PushPlus token 再测试。');
+        return;
+    }
+
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = '正在发送...';
+    try {
+        const data = await apiPost('/api/settings/pushplus/test', { target: typed });
+        showToastMessage(data.msg || '测试推送已发出。');
+    } catch (error) {
+        handleRequestError(error, '测试推送发送失败。');
+    } finally {
+        button.disabled = false;
+        button.textContent = originalText;
     }
 }
 

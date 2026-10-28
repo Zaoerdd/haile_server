@@ -16,6 +16,32 @@ def is_http_url(value: str) -> bool:
     return text.startswith('http://') or text.startswith('https://')
 
 
+def normalize_target(value: str) -> str:
+    """清洗用户粘贴进来的 PushPlus 目标。
+
+    手机端粘贴 token 常常带首尾空格或换行，纯 token 里不允许空白，
+    所以非 URL 一律把内部空白全部去掉；URL 只做首尾 trim（查询串可能含编码内容）。
+    """
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if is_http_url(text):
+        return text
+    return ''.join(text.split())
+
+
+def describe_target(value: str) -> str:
+    """给前端展示用的脱敏描述。"""
+    text = normalize_target(value)
+    if not text:
+        return ''
+    if is_http_url(text):
+        return text
+    if len(text) <= 8:
+        return text
+    return f'{text[:4]}****{text[-4:]}'
+
+
 class PushPlusNotifier:
     """PushPlus 推送。
 
@@ -38,7 +64,7 @@ class PushPlusNotifier:
         *,
         template: str = 'html',
     ) -> Dict[str, Any]:
-        raw_target = str(target or '').strip()
+        raw_target = normalize_target(target)
         if not raw_target:
             return {
                 'sent': False,

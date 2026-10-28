@@ -125,9 +125,20 @@
                         </label>
 
                         <label>
-                            PushPlus 链接
-                            <input type="url" id="settingsPushplusUrl" placeholder="后续用于推送运行状态">
+                            PushPlus Token / 链接
+                            <input
+                                type="text"
+                                id="settingsPushplusUrl"
+                                autocomplete="off"
+                                autocapitalize="off"
+                                autocorrect="off"
+                                spellcheck="false"
+                                placeholder="粘贴 32 位 token，或 https:// 开头的推送链接"
+                            >
+                            <span class="field-hint">直接粘贴 pushplus.plus 里那串 token 就行；也支持完整的推送 URL（自建网关用）。</span>
                         </label>
+
+                        <button type="button" id="settingsPushTestBtn" class="btn btn-light full-width">发送测试推送</button>
 
                         <label>
                             默认提前建单分钟数

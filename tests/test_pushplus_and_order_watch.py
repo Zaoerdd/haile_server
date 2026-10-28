@@ -109,6 +109,37 @@ class PushPlusNotifierTests(unittest.TestCase):
         self.assertFalse(result['sent'])
         self.assertEqual(result['reason'], 'pushplus_rejected')
 
+    def test_token_with_pasted_whitespace_is_cleaned(self):
+        notifier = PushPlusNotifier()
+        fake = FakeRequests(FakeResponse({'code': 200}))
+        token = 'd734aa7155d1455eb9a276352b6878db'
+        with patch.object(notifications, 'requests', fake):
+            result = notifier.notify(f'  {token[:16]}\n{token[16:]}  ', '标题', '内容')
+        self.assertTrue(result['sent'])
+        self.assertEqual(fake.calls[0]['json']['token'], token)
+
+    def test_normalize_target(self):
+        token = 'd734aa7155d1455eb9a276352b6878db'
+        self.assertEqual(notifications.normalize_target(token), token)
+        self.assertEqual(notifications.normalize_target(f' {token} \r\n'), token)
+        self.assertEqual(notifications.normalize_target(f'{token[:10]}\t{token[10:]}'), token)
+        self.assertEqual(
+            notifications.normalize_target('  https://x.example/send?a=1  '),
+            'https://x.example/send?a=1',
+            'URL 只做首尾 trim，不破坏查询串',
+        )
+        self.assertEqual(notifications.normalize_target(None), '')
+
+    def test_describe_target_masks_token(self):
+        token = 'd734aa7155d1455eb9a276352b6878db'
+        self.assertEqual(notifications.describe_target(token), 'd734****78db')
+        self.assertEqual(notifications.describe_target('short'), 'short')
+        self.assertEqual(notifications.describe_target(''), '')
+        self.assertEqual(
+            notifications.describe_target('https://x.example/send'),
+            'https://x.example/send',
+        )
+
 
 class OrderWatchStateTests(unittest.TestCase):
     def test_is_running_state(self):
